@@ -23,7 +23,10 @@ jobs:
             platform: linux-x86_64
           - runner: macos-14 # arm64
             platform: macos-aarch64
-          - runner: macos-13 # intel
+          # macos-13 was retired 2025-12-04 (actions/runner-images#13046);
+          # jobs targeting it queue forever. macos-15-intel is GitHub's last
+          # x86_64 macOS image and is scheduled to go away August 2027.
+          - runner: macos-15-intel
             platform: macos-x86_64
 
     steps:
