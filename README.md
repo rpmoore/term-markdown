@@ -19,8 +19,13 @@ cargo build --release
 ## Usage
 
 ```sh
-term-markdown <file.md>
+term-markdown [--root <dir>] <file.md>
 ```
+
+Links are followable. Relative links resolve against the current file; absolute links (`/x/y.md`)
+resolve against the [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+bundle root, auto-detected from the `index.md` ancestry of the opened file (bounded by the git
+repo). Pass `--root <dir>` when the guess is wrong.
 
 | Key | Action |
 |---|---|
