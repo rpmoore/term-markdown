@@ -89,6 +89,11 @@ fn resolve_target(current_file: &Path, target: &str) -> Target {
         return Target::External(target.to_string());
     }
     let base = current_file.parent().unwrap_or_else(|| Path::new("."));
+    // Treat a leading '/' as repo/doc-root-relative, not a real filesystem
+    // absolute path — otherwise `Path::join` discards `base` entirely and
+    // we'd resolve against the host filesystem root instead of the
+    // markdown file's own directory.
+    let path_part = path_part.trim_start_matches('/');
     let resolved = base.join(path_part);
     if resolved.is_file() {
         Target::File(resolved)
@@ -429,6 +434,27 @@ mod tests {
         match resolved {
             Target::File(path) => assert_eq!(path, sibling),
             _ => panic!("expected File target"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn absolute_path_link_resolves_relative_to_current_file_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("term-markdown-test-abs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("current.md");
+        let sibling = dir.join("other.md");
+        std::fs::write(&sibling, "hello").unwrap();
+
+        // A link written as an absolute path (e.g. "/other.md") should be
+        // treated as relative to current_file's directory, not the host
+        // filesystem root.
+        let resolved = resolve_target(&current, "/other.md");
+        match resolved {
+            Target::File(path) => assert_eq!(path, sibling),
+            other => panic!("expected File target, got {}", target_kind(other)),
         }
 
         std::fs::remove_dir_all(&dir).ok();
