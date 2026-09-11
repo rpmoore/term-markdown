@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x86_64
+          - runner: macos-14 # arm64
+            platform: macos-aarch64
+          - runner: macos-13 # intel
+            platform: macos-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      - name: Verify release tag matches Cargo.toml version
+        run: |
+          cargo_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$RELEASE_TAG" != "v$cargo_version" ]; then
+            echo "::error::release tag '$RELEASE_TAG' does not match Cargo.toml version 'v$cargo_version' — bump Cargo.toml and merge before tagging"
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package binary
+        run: tar czf "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz" -C target/release term-markdown
+
+      - name: Checksum tarball
+        run: shasum -a 256 "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz" > "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz.sha256"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz" \
+            "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz.sha256" \
+            --clobber
+
+  notes:
+    name: Generate release notes
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Generate and set changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(gh api repos/${{ github.repository }}/releases/generate-notes -f tag_name="$RELEASE_TAG" --jq .body)"
+          gh release edit "$RELEASE_TAG" --notes "$notes" --repo "${{ github.repository }}"

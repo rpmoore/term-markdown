@@ -1,0 +1,21 @@
+[advisories]
+# Unmaintained (not vulnerable) transitive deps pulled in by syntect/ratatui
+# that we don't control and have no direct replacement for. Revisit if
+# syntect/ratatui drop them or a vulnerability advisory is filed instead.
+ignore = [
+    "RUSTSEC-2025-0141", # bincode, via syntect
+    "RUSTSEC-2024-0436", # paste, via ratatui
+    "RUSTSEC-2024-0320", # yaml-rust, via syntect
+]
+
+[licenses]
+# Keep policy explicit; allow common permissive licenses used by our deps.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]

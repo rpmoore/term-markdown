@@ -2,6 +2,9 @@
 name = "term-markdown"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "A terminal markdown viewer with syntax-highlighted code blocks and link navigation."
+repository = "https://github.com/rpmoore/term-markdown"
 
 [dependencies]
 ratatui = "0.29"
