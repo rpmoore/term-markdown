@@ -34,6 +34,14 @@ Fenced/indented code blocks are buffered, not streamed: `Tag::CodeBlock` sets `i
 
 Fence lines (`` ```lang `` / `` ``` ``) are emitted as plain gray `Line`s surrounding the highlighted body, not passed through syntect (`src/markdown.rs:124-134`, `184-187`).
 
+## Link tracking
+
+`render` returns `Rendered { text, links }` (`src/markdown.rs:75-78`), not a bare `Text` — `links: Vec<Link>` records every markdown link found, each located by `(line, span_start, span_end)` into the returned `Text`'s `Line::spans`, not by screen column: column position depends on wrapping/scroll, so it's cheap to recompute on demand instead (see `link_col_range`, `src/markdown.rs`, used only for mouse hit-testing).
+
+`Tag::Link { dest_url, .. }` pushes `(current.len(), dest_url)` onto `link_stack` (`src/markdown.rs:192-195`); `TagEnd::Link` pops it, and if the link's text produced at least one span (`span_end > span_start`), stages `(span_start, span_end, target)` into `pending_links`. Staged links resolve to a concrete line index only at the next `flush_line` call (`src/markdown.rs:80-96`), since a link's owning `current`/`Line` may not be flushed until later in the same block (e.g. more text after the link, before the paragraph ends) — `pending_links` is drained into `links` at that flush, stamped with `lines.len()` (the index the flushed line is about to occupy). This assumes a link's start and end always fall within one `flush_line`-delimited segment (true today: nothing flushes mid-link since link contents are inline-only, no block-level breaks).
+
+Images (`Tag::Image`) are styled but not tracked as links — not navigable targets for a file viewer.
+
 ## Known gap
 
 Table rendering pushes bold styling and a two-space separator per cell (`src/markdown.rs:158-160`, `200-203`) but does not align columns or draw borders — cells just run together in reading order with no `Tag::Table` grid handling.
