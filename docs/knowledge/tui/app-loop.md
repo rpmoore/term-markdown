@@ -38,9 +38,9 @@ around it.
 ## Row accounting
 
 `ratatui::widgets::Paragraph`'s `.scroll((y, x))` offset counts **wrapped display rows**, not
-logical `Line`s — its render loop advances `y` once per row yielded by its internal word-wrapper and
-compares that directly against `scroll.y` (confirmed against `ratatui-0.29.0`'s
-`paragraph.rs::render_text`). Since `app.body.lines.len()` counts logical lines, using it directly
+logical `Line`s — with wrapping enabled, its render path skips `scroll.y` rows yielded by its
+internal word-wrapper before rendering (confirmed against ratatui's `Paragraph` render source).
+Since `app.body.lines.len()` counts logical lines, using it directly
 for scroll clamping or for mapping a clicked screen row back to a link (as an earlier version of
 this code did) drifts as soon as any earlier line word-wraps — every logical line after the first
 wrapped one lands on the wrong screen row.
