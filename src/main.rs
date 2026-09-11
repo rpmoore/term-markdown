@@ -297,10 +297,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                         if inside {
                             let line = app.scroll as usize + (mouse.row - body_area.y - 1) as usize;
                             let col = mouse.column - body_area.x - 1;
-                            if let Some(idx) = app.link_at(line, col) {
-                                app.status = None;
-                                app.selected_link = Some(idx);
-                                app.follow_selected();
+                            match app.link_at(line, col) {
+                                Some(idx) => {
+                                    app.status = None;
+                                    app.selected_link = Some(idx);
+                                    app.follow_selected();
+                                }
+                                None => {
+                                    app.status = Some(format!(
+                                        "click at line {line} col {col}: no link there"
+                                    ));
+                                }
                             }
                         }
                     }
