@@ -88,7 +88,18 @@ fn resolve_target(current_file: &Path, target: &str) -> Target {
     if path_part.contains("://") || path_part.starts_with("mailto:") {
         return Target::External(target.to_string());
     }
+    // A protocol-relative URL ("//host/path") is not a local path at all —
+    // treat it like any other external link rather than letting the
+    // single-slash stripping below turn it into a relative path lookup.
+    if path_part.starts_with("//") {
+        return Target::External(target.to_string());
+    }
     let base = current_file.parent().unwrap_or_else(|| Path::new("."));
+    // A single leading '/' makes `Path::join` discard `base` entirely and
+    // resolve against the host filesystem root. Strip just that one slash
+    // so the path is instead resolved relative to the markdown file's own
+    // directory.
+    let path_part = path_part.strip_prefix('/').unwrap_or(path_part);
     let resolved = base.join(path_part);
     if resolved.is_file() {
         Target::File(resolved)
@@ -432,6 +443,38 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn absolute_path_link_resolves_relative_to_current_file_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("term-markdown-test-abs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("current.md");
+        let sibling = dir.join("other.md");
+        std::fs::write(&sibling, "hello").unwrap();
+
+        // A link written as an absolute path (e.g. "/other.md") should be
+        // treated as relative to current_file's directory, not the host
+        // filesystem root.
+        let resolved = resolve_target(&current, "/other.md");
+        match resolved {
+            Target::File(path) => assert_eq!(path, sibling),
+            other => panic!("expected File target, got {}", target_kind(other)),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn protocol_relative_path_is_external_not_stripped_to_relative() {
+        let current = PathBuf::from("/tmp/current.md");
+        // A leading "//" is a protocol-relative URL, not the "single leading
+        // slash" case we reinterpret as file-dir-relative — it must not be
+        // stripped down to a relative path lookup (which could otherwise
+        // silently hit an unrelated local file with a matching name).
+        let resolved = resolve_target(&current, "//example.com/readme.md");
+        assert_eq!(target_kind(resolved), "external");
     }
 
     #[test]
