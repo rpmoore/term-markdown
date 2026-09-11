@@ -65,8 +65,8 @@ targets, not cached beyond that.
 
 ## Draw loop
 
-`run` (`src/main.rs:372-490`) loops: draw a frame, then poll for input with a 250ms timeout so the loop
-stays responsive without busy-waiting. Layout is two rows — `Constraint::Min(1)` body +
+`run` (`src/main.rs:372-490`) loops: draw a frame, then poll for input with a 250ms timeout so the
+loop stays responsive without busy-waiting. Layout is two rows — `Constraint::Min(1)` body +
 `Constraint::Length(1)` status bar. `body_height`, `body_area`, and `content_width` (border-adjusted
 body width, i.e. `chunks[0].width - 2`, matching the width ratatui itself wraps at) are recomputed
 every frame and captured via closure into the outer scope so the event-handling code below can use
@@ -118,8 +118,8 @@ bundle-absolute path; otherwise the fragment is dropped and the path is probed f
   tool-generated links that really do point at the host filesystem). The bundle root wins when both
   exist.
 - **relative** (anything else, `src/main.rs:121-128`): joined to `current_file`'s parent directory,
-  with no clamping to the bundle — links that deliberately climb out of the bundle (`../../src/x.md`)
-  work.
+  with no clamping to the bundle — links that deliberately climb out of the bundle
+  (`../../src/x.md`) work.
 
 `probe` (`src/main.rs:135-148`) takes the first candidate that `is_file()`; if none does and the
 path ends in a `:<digits>` location suffix (`strip_line_suffix`, `src/main.rs:152-156`), it retries

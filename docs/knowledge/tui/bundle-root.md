@@ -56,8 +56,8 @@ and a key that only appears in the body after the closing fence doesn't count.
 
 - term-markdown's own `docs/knowledge/`: `index.md` declares `okf_version: "0.2"`, so rule 1 fires
   from any file under it — and does so even in a tarball checkout with no `.git`.
-- A bundle whose root `index.md` has no frontmatter, inside a git repo, with nested `index.md`s and a
-  gap (`docs/plans/` has none, `docs/plans/x/sections/` does): rule 2 picks `docs/` from any file,
+- A bundle whose root `index.md` has no frontmatter, inside a git repo, with nested `index.md`s and
+  a gap (`docs/plans/` has none, `docs/plans/x/sections/` does): rule 2 picks `docs/` from any file,
   because the walk is bounded at the repo toplevel and `docs/` is the outermost `index.md` below it.
 
 ## Known misdetections (all fixed with `--root`)
