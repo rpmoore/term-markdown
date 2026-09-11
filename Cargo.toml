@@ -7,9 +7,9 @@ description = "A terminal markdown viewer with syntax-highlighted code blocks an
 repository = "https://github.com/rpmoore/term-markdown"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
-pulldown-cmark = "0.12"
+ratatui = "0.30"
+crossterm = "0.29"
+pulldown-cmark = "0.13"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
