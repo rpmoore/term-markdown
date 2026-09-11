@@ -14,8 +14,9 @@ pulldown-cmark has no frontmatter concept, so left in, a closing `---` right aft
 reads as a Setext-heading underline and the entire frontmatter block becomes one giant heading
 `Line`. `strip_frontmatter` only acts when the file starts with `---\n` *and* a closing `\n---\n`
 (or `\n---` at EOF) is found later; a bare leading `---` with no closing fence is left untouched
-(it's a thematic break, not frontmatter). All of this repo's `docs/knowledge/*.md` files carry
-frontmatter, so this runs on every concept-doc render. It runs a single pass over
+(it's a thematic break, not frontmatter). Every concept doc under `docs/knowledge/` (e.g. this
+file) carries frontmatter, so this runs on every concept-doc render — the area `index.md` files
+have none (OKF spec §8), so there's nothing for it to strip there. It runs a single pass over
 `pulldown_cmark::Parser` events and builds a `Vec<Line<'static>>`, returned as `Text::from(lines)`
 (`src/markdown.rs:256`).
 
