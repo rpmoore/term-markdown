@@ -95,9 +95,30 @@ fn flush_line(
     lines.push(Line::from(std::mem::take(current)));
 }
 
+/// Strip a leading YAML frontmatter block (`---` ... `---`), if present.
+/// pulldown-cmark has no frontmatter concept: left in, a `---` closing fence
+/// right after non-blank lines reads as a Setext heading underline, turning
+/// the whole frontmatter block into one giant heading line.
+fn strip_frontmatter(source: &str) -> &str {
+    let Some(rest) = source.strip_prefix("---\n") else {
+        return source;
+    };
+    if let Some(end) = rest.find("\n---\n") {
+        // Closing fence found mid-file: body starts after it.
+        return &rest[end + 5..];
+    }
+    if rest.strip_suffix("\n---\n").is_some() || rest.strip_suffix("\n---").is_some() {
+        // The whole file is frontmatter.
+        return "";
+    }
+    // No closing fence: not actually frontmatter, leave untouched.
+    source
+}
+
 /// Convert a markdown source string into a styled ratatui `Text` (plus the
 /// links found in it) ready for display in a scrollable widget.
 pub fn render(source: &str) -> Rendered {
+    let source = strip_frontmatter(source);
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
     let theme = &theme_set.themes["base16-ocean.dark"];
@@ -363,5 +384,49 @@ mod tests {
         assert!(rendered.links.is_empty());
         // fence lines + at least one highlighted body line should be present
         assert!(rendered.text.lines.len() >= 3);
+    }
+
+    #[test]
+    fn frontmatter_is_stripped_before_parsing() {
+        let src = "---\ntitle: hi\ntags: [a, b]\n---\n\n# Heading\n\nbody text\n";
+        let rendered = render(src);
+        let first_line: String = rendered.text.lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(first_line, "# Heading");
+    }
+
+    #[test]
+    fn frontmatter_only_file_renders_empty() {
+        let rendered = render("---\ntitle: hi\n---\n");
+        assert!(rendered.text.lines.is_empty() || rendered.text.lines == vec![Line::from("")]);
+    }
+
+    #[test]
+    fn no_frontmatter_is_left_untouched() {
+        let rendered = render("# Heading\n\nbody\n");
+        let first_line: String = rendered.text.lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(first_line, "# Heading");
+    }
+
+    #[test]
+    fn dashes_without_closing_fence_are_not_treated_as_frontmatter() {
+        // "---" alone at the top with no second "---" is a thematic break,
+        // not frontmatter - must not be swallowed.
+        let rendered = render("---\nnot frontmatter, just a rule above this text\n");
+        let joined: String = rendered
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("not frontmatter"));
     }
 }

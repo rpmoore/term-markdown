@@ -20,8 +20,43 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use markdown::Link;
+
+/// How many terminal rows `text` occupies once word-wrapped at `width`
+/// columns, matching ratatui's `Wrap { trim: false }` behavior closely
+/// enough to map screen rows back to logical lines (ratatui's own wrapper
+/// lives in a private module, so this is a reimplementation, not a call-out
+/// to it). A width of 0, or empty text, always occupies exactly one row.
+fn wrapped_row_count(text: &str, width: u16) -> u16 {
+    if width == 0 || text.is_empty() {
+        return 1;
+    }
+    let width = width as usize;
+    let mut rows: usize = 1;
+    let mut col: usize = 0;
+    for chunk in text.split_inclusive(' ') {
+        let w = chunk.width();
+        if w > width {
+            if col > 0 {
+                rows += 1;
+            }
+            let mut remaining = w;
+            while remaining > width {
+                rows += 1;
+                remaining -= width;
+            }
+            col = remaining;
+        } else if col + w > width {
+            rows += 1;
+            col = w;
+        } else {
+            col += w;
+        }
+    }
+    rows as u16
+}
 
 /// Terminal markdown viewer.
 #[derive(ClapParser)]
@@ -99,29 +134,62 @@ impl App {
         Ok(())
     }
 
-    fn max_scroll(&self, viewport_height: u16) -> u16 {
-        let total = self.body.lines.len() as u16;
+    /// Cumulative display-row start of each logical line at `width` columns,
+    /// plus a trailing sentinel equal to the total row count. `ratatui`'s
+    /// `Paragraph::scroll` offset counts wrapped display rows, not logical
+    /// lines (see `render_text` in ratatui's paragraph widget), so anything
+    /// mapping a screen row back to a logical line — or clamping scroll —
+    /// needs this rather than `self.body.lines.len()`.
+    fn row_starts(&self, width: u16) -> Vec<u16> {
+        let mut starts = Vec::with_capacity(self.body.lines.len() + 1);
+        let mut acc: u16 = 0;
+        for line in &self.body.lines {
+            starts.push(acc);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            acc = acc.saturating_add(wrapped_row_count(&text, width));
+        }
+        starts.push(acc);
+        starts
+    }
+
+    /// The logical line and within-line display row that screen `row`
+    /// (0-based, counted from the top of scrolled content) falls on, or
+    /// `None` if `row` is past the end of the document.
+    fn line_at_row(&self, row: u16, width: u16) -> Option<(usize, u16)> {
+        let starts = self.row_starts(width);
+        let total = *starts.last().unwrap();
+        if row >= total {
+            return None;
+        }
+        let n = starts.len() - 1;
+        let idx = starts[..n].partition_point(|&s| s <= row);
+        let line = idx.saturating_sub(1);
+        Some((line, row - starts[line]))
+    }
+
+    fn max_scroll(&self, viewport_height: u16, width: u16) -> u16 {
+        let total = *self.row_starts(width).last().unwrap();
         total.saturating_sub(viewport_height)
     }
 
-    fn scroll_by(&mut self, delta: i32, viewport_height: u16) {
-        let max = self.max_scroll(viewport_height);
+    fn scroll_by(&mut self, delta: i32, viewport_height: u16, width: u16) {
+        let max = self.max_scroll(viewport_height, width);
         let new = (self.scroll as i32 + delta).clamp(0, max as i32);
         self.scroll = new as u16;
     }
 
-    fn ensure_line_visible(&mut self, line: usize, viewport_height: u16) {
-        let line = line as u16;
-        if line < self.scroll {
-            self.scroll = line;
-        } else if viewport_height > 0 && line >= self.scroll + viewport_height {
-            self.scroll = line + 1 - viewport_height;
+    fn ensure_line_visible(&mut self, line: usize, viewport_height: u16, width: u16) {
+        let row = self.row_starts(width)[line];
+        if row < self.scroll {
+            self.scroll = row;
+        } else if viewport_height > 0 && row >= self.scroll + viewport_height {
+            self.scroll = row + 1 - viewport_height;
         }
-        let max = self.max_scroll(viewport_height);
+        let max = self.max_scroll(viewport_height, width);
         self.scroll = self.scroll.min(max);
     }
 
-    fn select_next_link(&mut self, forward: bool, viewport_height: u16) {
+    fn select_next_link(&mut self, forward: bool, viewport_height: u16, width: u16) {
         if self.links.is_empty() {
             self.status = Some("no links in this document".to_string());
             return;
@@ -133,7 +201,7 @@ impl App {
         };
         self.selected_link = Some(next);
         let line = self.links[next].line;
-        self.ensure_line_visible(line, viewport_height);
+        self.ensure_line_visible(line, viewport_height, width);
     }
 
     fn follow(&mut self, target: &str) {
@@ -216,6 +284,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     let mut body_height: u16 = 0;
     let mut body_area = Rect::default();
+    let mut content_width: u16 = 0;
 
     loop {
         terminal.draw(|frame| {
@@ -224,6 +293,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
 
             body_area = chunks[0];
             body_height = chunks[0].height.saturating_sub(2);
+            content_width = chunks[0].width.saturating_sub(2);
+
+            app.scroll = app.scroll.min(app.max_scroll(body_height, content_width));
 
             let mut text = app.body.clone();
             if let Some(idx) = app.selected_link {
@@ -244,7 +316,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                 .scroll((app.scroll, 0));
             frame.render_widget(paragraph, chunks[0]);
 
-            let max = app.max_scroll(body_height);
+            let max = app.max_scroll(body_height, content_width);
             let hint = "q: quit  j/k: scroll  g/G: top/bottom  Tab: next link  Enter: open  Backspace: back";
             let status_text = match &app.status {
                 Some(msg) => format!(" {msg}"),
@@ -267,22 +339,26 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                     }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('j') | KeyCode::Down => app.scroll_by(1, body_height),
-                        KeyCode::Char('k') | KeyCode::Up => app.scroll_by(-1, body_height),
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.scroll_by(1, body_height, content_width)
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.scroll_by(-1, body_height, content_width)
+                        }
                         KeyCode::Char('d') | KeyCode::PageDown => {
-                            app.scroll_by(body_height as i32 / 2, body_height)
+                            app.scroll_by(body_height as i32 / 2, body_height, content_width)
                         }
                         KeyCode::Char('u') | KeyCode::PageUp => {
-                            app.scroll_by(-(body_height as i32) / 2, body_height)
+                            app.scroll_by(-(body_height as i32) / 2, body_height, content_width)
                         }
                         KeyCode::Char('g') | KeyCode::Home => {
-                            app.scroll_by(i32::MIN / 2, body_height)
+                            app.scroll_by(i32::MIN / 2, body_height, content_width)
                         }
                         KeyCode::Char('G') | KeyCode::End => {
-                            app.scroll_by(i32::MAX / 2, body_height)
+                            app.scroll_by(i32::MAX / 2, body_height, content_width)
                         }
-                        KeyCode::Tab => app.select_next_link(true, body_height),
-                        KeyCode::BackTab => app.select_next_link(false, body_height),
+                        KeyCode::Tab => app.select_next_link(true, body_height, content_width),
+                        KeyCode::BackTab => app.select_next_link(false, body_height, content_width),
                         KeyCode::Enter => app.follow_selected(),
                         KeyCode::Backspace => app.go_back(),
                         _ => {}
@@ -295,19 +371,27 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                             && mouse.column > body_area.x
                             && mouse.column + 1 < body_area.x + body_area.width;
                         if inside {
-                            let line = app.scroll as usize + (mouse.row - body_area.y - 1) as usize;
+                            let row = app.scroll + (mouse.row - body_area.y - 1);
                             let col = mouse.column - body_area.x - 1;
-                            match app.link_at(line, col) {
-                                Some(idx) => {
-                                    app.status = None;
-                                    app.selected_link = Some(idx);
-                                    app.follow_selected();
-                                }
-                                None => {
+                            match app.line_at_row(row, content_width) {
+                                Some((line, 0)) => match app.link_at(line, col) {
+                                    Some(idx) => {
+                                        app.status = None;
+                                        app.selected_link = Some(idx);
+                                        app.follow_selected();
+                                    }
+                                    None => {
+                                        app.status = Some(format!(
+                                            "click at line {line} col {col}: no link there"
+                                        ));
+                                    }
+                                },
+                                Some((line, sub_row)) => {
                                     app.status = Some(format!(
-                                        "click at line {line} col {col}: no link there"
+                                        "click on wrapped row {sub_row} of line {line}: not supported yet, use Tab instead"
                                     ));
                                 }
+                                None => {}
                             }
                         }
                     }
@@ -379,5 +463,87 @@ mod tests {
             Target::Anchor(frag) => assert_eq!(frag, "some-heading"),
             _ => panic!("expected Anchor target"),
         }
+    }
+
+    #[test]
+    fn short_text_takes_one_row() {
+        assert_eq!(wrapped_row_count("hello world", 80), 1);
+    }
+
+    #[test]
+    fn long_text_wraps_across_multiple_rows() {
+        let text = "a ".repeat(50); // 100 cols wide
+        assert_eq!(wrapped_row_count(&text, 20), 5);
+    }
+
+    #[test]
+    fn single_overlong_word_force_wraps() {
+        let text = "x".repeat(45);
+        assert_eq!(wrapped_row_count(&text, 20), 3); // 20 + 20 + 5
+    }
+
+    #[test]
+    fn row_starts_accounts_for_wrapped_lines() {
+        let dir =
+            std::env::temp_dir().join(format!("term-markdown-rowtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("doc.md");
+        // line 0: wraps to 2 rows at width 10 ("0123456789" + "abcde")
+        // line 1: single short row
+        std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
+
+        let app = App::new(file).unwrap();
+        let starts = app.row_starts(10);
+        // first logical line should take >1 row at this width
+        assert!(starts[1] - starts[0] > 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_doc_link_hit_tests_correctly_despite_frontmatter_and_wrapping() {
+        // Regression test: docs/knowledge/index.md has frontmatter and a
+        // paragraph long enough to wrap at a typical terminal width. Before
+        // the frontmatter-stripping and row-accounting fixes, clicking the
+        // "rendering" link landed several rows off because the frontmatter
+        // rendered as one giant wrapped heading.
+        let app = App::new(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/knowledge/index.md"
+        )))
+        .unwrap();
+        let width = 78u16;
+
+        let rendering_link = app
+            .links
+            .iter()
+            .position(|l| l.target == "rendering/index.md")
+            .expect("rendering link present");
+
+        let link = &app.links[rendering_link];
+        let (start, end) = markdown::link_col_range(&app.body.lines[link.line], link);
+        let click_col = start + (end - start) / 2;
+        let click_row = app.row_starts(width)[link.line]; // first row of that line
+
+        let (line, sub_row) = app.line_at_row(click_row, width).unwrap();
+        assert_eq!(sub_row, 0, "link's own line should not be pre-wrapped");
+        assert_eq!(app.link_at(line, click_col), Some(rendering_link));
+    }
+
+    #[test]
+    fn line_at_row_finds_wrapped_continuation() {
+        let dir =
+            std::env::temp_dir().join(format!("term-markdown-rowtest2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
+
+        let app = App::new(file).unwrap();
+        let (line, sub_row) = app.line_at_row(0, 10).unwrap();
+        assert_eq!((line, sub_row), (0, 0));
+        let (line, sub_row) = app.line_at_row(1, 10).unwrap();
+        assert_eq!((line, sub_row), (0, 1)); // second wrapped row of line 0
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
