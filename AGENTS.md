@@ -40,6 +40,7 @@ No justfile/Makefile — this is a small, single-crate project. Use plain `cargo
 - Separate concerns by module:
   - `main.rs` owns the TUI app loop — terminal setup/teardown, event handling, scroll state, rendering the frame.
   - `markdown.rs` owns markdown → styled `ratatui::Text` conversion — parsing, span/style construction, code-block syntax highlighting.
+  - `bundle.rs` owns OKF bundle-root detection for absolute links — pure filesystem walking, no terminal I/O.
 - Keep the event loop thin. Move rendering/parsing logic into functions that can be unit tested without a live terminal.
 - Add tests at the lowest useful level — markdown-rendering edge cases belong near `markdown.rs`, not exercised through the TUI loop.
 - Keep functions short enough to scan. If a function mixes parsing, styling, and I/O, split it.

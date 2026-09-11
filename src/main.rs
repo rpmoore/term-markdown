@@ -1,10 +1,11 @@
+mod bundle;
 mod markdown;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Parser as ClapParser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
@@ -64,9 +65,14 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
 struct Args {
     /// Markdown file to view
     file: PathBuf,
+
+    /// Bundle root for absolute (`/x/y.md`) links; auto-detected when omitted
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
 }
 
-/// Where a link points, resolved relative to the file it appeared in.
+/// Where a link points: relative paths resolve against the file it appeared
+/// in, absolute (`/x/y.md`) paths against the OKF bundle root.
 enum Target {
     /// A markdown file on disk that exists and can be navigated to.
     File(PathBuf),
@@ -78,7 +84,18 @@ enum Target {
     NotFound(PathBuf),
 }
 
-fn resolve_target(current_file: &Path, target: &str) -> Target {
+/// The two paths a link is resolved against. Both are borrowed from `App`;
+/// bundling them keeps `resolve_target` from taking two positional `&Path`s
+/// that would silently accept being swapped.
+#[derive(Clone, Copy)]
+struct LinkBase<'a> {
+    /// File the link appeared in — base for relative targets.
+    current_file: &'a Path,
+    /// OKF bundle root — base for `/`-prefixed targets.
+    bundle_root: &'a Path,
+}
+
+fn resolve_target(base: LinkBase<'_>, target: &str) -> Target {
     if let Some((path_part, fragment)) = target.split_once('#')
         && path_part.is_empty()
     {
@@ -89,27 +106,76 @@ fn resolve_target(current_file: &Path, target: &str) -> Target {
         return Target::External(target.to_string());
     }
     // A protocol-relative URL ("//host/path") is not a local path at all —
-    // treat it like any other external link rather than letting the
-    // single-slash stripping below turn it into a relative path lookup.
+    // treat it like any other external link rather than a bundle-root lookup.
     if path_part.starts_with("//") {
         return Target::External(target.to_string());
     }
-    let base = current_file.parent().unwrap_or_else(|| Path::new("."));
-    // A single leading '/' makes `Path::join` discard `base` entirely and
-    // resolve against the host filesystem root. Strip just that one slash
-    // so the path is instead resolved relative to the markdown file's own
-    // directory.
-    let path_part = path_part.strip_prefix('/').unwrap_or(path_part);
-    let resolved = base.join(path_part);
-    if resolved.is_file() {
-        Target::File(resolved)
+    if path_part.starts_with('/') {
+        // OKF §5.1: absolute links are bundle-relative. Fall back to the
+        // literal filesystem path for tool-generated links that really do
+        // point at the host filesystem.
+        let root = base.bundle_root.to_path_buf();
+        probe(path_part, |p| {
+            vec![root.join(clamp_to_root(p)), PathBuf::from(p)]
+        })
     } else {
-        Target::NotFound(resolved)
+        let dir = base
+            .current_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        probe(path_part, |p| vec![dir.join(p)])
     }
+}
+
+/// `path` as a relative path with `.`/`..` segments resolved and clamped at
+/// the top, so a bundle-absolute `/../x.md` or `/a/../../x.md` still lands
+/// inside the bundle root rather than a sibling of it.
+fn clamp_to_root(path: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out
+}
+
+/// Return the first existing file among `candidates(path)`; failing that,
+/// retry with a trailing `:LINE` (and then `:LINE:COL`) stripped, since
+/// tool-generated links often carry a location suffix. `NotFound` reports
+/// the first candidate for the path as written.
+fn probe(path: &str, candidates: impl Fn(&str) -> Vec<PathBuf>) -> Target {
+    let first = candidates(path);
+    let mut attempt = path;
+    for _ in 0..3 {
+        if let Some(hit) = candidates(attempt).into_iter().find(|p| p.is_file()) {
+            return Target::File(hit);
+        }
+        match strip_line_suffix(attempt) {
+            Some(stripped) => attempt = stripped,
+            None => break,
+        }
+    }
+    Target::NotFound(first.into_iter().next().unwrap_or_default())
+}
+
+/// `path` without a trailing `:<digits>` location suffix, or `None` when
+/// there is no such suffix (so `foo:bar.md` and `a.go:` are left alone).
+fn strip_line_suffix(path: &str) -> Option<&str> {
+    let (head, tail) = path.rsplit_once(':')?;
+    (!head.is_empty() && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(head)
 }
 
 struct App {
     path: PathBuf,
+    /// Base for absolute links; fixed at startup, never changed by `load`.
+    bundle_root: PathBuf,
     body: Text<'static>,
     links: Vec<Link>,
     scroll: u16,
@@ -119,9 +185,10 @@ struct App {
 }
 
 impl App {
-    fn new(path: PathBuf) -> Result<Self> {
+    fn new(path: PathBuf, bundle_root: PathBuf) -> Result<Self> {
         let mut app = App {
             path: PathBuf::new(),
+            bundle_root,
             body: Text::default(),
             links: Vec::new(),
             scroll: 0,
@@ -216,7 +283,11 @@ impl App {
     }
 
     fn follow(&mut self, target: &str) {
-        match resolve_target(&self.path, target) {
+        let base = LinkBase {
+            current_file: &self.path,
+            bundle_root: &self.bundle_root,
+        };
+        match resolve_target(base, target) {
             Target::File(path) => {
                 let from = (self.path.clone(), self.scroll);
                 match self.load(path) {
@@ -231,7 +302,14 @@ impl App {
                 self.status = Some(format!("in-page anchors not supported yet: #{fragment}"));
             }
             Target::NotFound(path) => {
-                self.status = Some(format!("link target not found: {}", path.display()));
+                // Name the bundle root for absolute links so a misdetected
+                // root (fixable with --root) is obvious from the message.
+                let hint = if target.starts_with('/') {
+                    format!(" (bundle root: {})", self.bundle_root.display())
+                } else {
+                    String::new()
+                };
+                self.status = Some(format!("link target not found: {}{hint}", path.display()));
             }
         }
     }
@@ -266,12 +344,28 @@ impl App {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut app = App::new(args.file)?;
+    let bundle_root = match args.root {
+        Some(root) => explicit_root(root)?,
+        None => bundle::detect_root(&args.file).context("failed to detect bundle root")?,
+    };
+    let mut app = App::new(args.file, bundle_root)?;
 
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, &mut app);
     restore_terminal(&mut terminal)?;
     result
+}
+
+/// Validate a user-supplied `--root` and canonicalize it so status messages
+/// don't carry `..` components around.
+fn explicit_root(root: PathBuf) -> Result<PathBuf> {
+    ensure!(
+        root.is_dir(),
+        "--root {} is not a directory",
+        root.display()
+    );
+    std::fs::canonicalize(&root)
+        .with_context(|| format!("failed to resolve --root {}", root.display()))
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -428,80 +522,302 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolves_relative_path_to_sibling_file() {
-        let dir = std::env::temp_dir().join(format!("term-markdown-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let current = dir.join("current.md");
-        let sibling = dir.join("other.md");
-        std::fs::write(&sibling, "hello").unwrap();
-
-        let resolved = resolve_target(&current, "./other.md");
-        match resolved {
-            Target::File(path) => assert_eq!(path, sibling),
-            _ => panic!("expected File target"),
-        }
-
+    fn temp_tree(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("term-markdown-{tag}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    #[test]
-    fn absolute_path_link_resolves_relative_to_current_file_dir() {
-        let dir =
-            std::env::temp_dir().join(format!("term-markdown-test-abs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let current = dir.join("current.md");
-        let sibling = dir.join("other.md");
-        std::fs::write(&sibling, "hello").unwrap();
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "hello").unwrap();
+    }
 
-        // A link written as an absolute path (e.g. "/other.md") should be
-        // treated as relative to current_file's directory, not the host
-        // filesystem root.
-        let resolved = resolve_target(&current, "/other.md");
-        match resolved {
-            Target::File(path) => assert_eq!(path, sibling),
+    fn base<'a>(current_file: &'a Path, bundle_root: &'a Path) -> LinkBase<'a> {
+        LinkBase {
+            current_file,
+            bundle_root,
+        }
+    }
+
+    fn expect_file(target: Target) -> PathBuf {
+        match target {
+            Target::File(path) => path,
             other => panic!("expected File target, got {}", target_kind(other)),
         }
+    }
+
+    fn expect_not_found(target: Target) -> PathBuf {
+        match target {
+            Target::NotFound(path) => path,
+            other => panic!("expected NotFound target, got {}", target_kind(other)),
+        }
+    }
+
+    const UNUSED_ROOT: &str = "/tmp/term-markdown-unused-root";
+
+    #[test]
+    fn resolves_relative_path_to_sibling_file() {
+        let dir = temp_tree("test");
+        let current = dir.join("current.md");
+        let sibling = dir.join("other.md");
+        touch(&sibling);
+
+        let resolved = resolve_target(base(&current, Path::new(UNUSED_ROOT)), "./other.md");
+        assert_eq!(expect_file(resolved), sibling);
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn protocol_relative_path_is_external_not_stripped_to_relative() {
+    fn absolute_link_from_nested_file_resolves_against_bundle_root() {
+        let t = temp_tree("abs-nested");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let wanted = root.join("x/y.md");
+        touch(&wanted);
+        // Decoy: what the old "relative to the file's dir" rule would pick.
+        touch(&root.join("sub/x/y.md"));
+
+        let resolved = resolve_target(base(&current, &root), "/x/y.md");
+        assert_eq!(expect_file(resolved), wanted);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn absolute_link_parent_segments_are_clamped_at_bundle_root() {
+        let t = temp_tree("abs-dotdot");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let inside = root.join("guide.md");
+        touch(&inside);
+        // Decoy: what an unclamped `<root>/../guide.md` would open.
+        touch(&t.join("guide.md"));
+
+        let b = base(&current, &root);
+        assert_eq!(expect_file(resolve_target(b, "/../guide.md")), inside);
+        assert_eq!(
+            expect_file(resolve_target(b, "/sub/../../guide.md")),
+            inside
+        );
+        assert_eq!(expect_file(resolve_target(b, "/./guide.md")), inside);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn clamp_to_root_cases() {
+        assert_eq!(clamp_to_root("/x/y.md"), PathBuf::from("x/y.md"));
+        assert_eq!(clamp_to_root("/../x.md"), PathBuf::from("x.md"));
+        assert_eq!(clamp_to_root("/a/../b/./c.md"), PathBuf::from("b/c.md"));
+        assert_eq!(clamp_to_root("/a//b.md"), PathBuf::from("a/b.md"));
+    }
+
+    #[test]
+    fn absolute_link_from_root_level_file_resolves_against_bundle_root() {
+        let t = temp_tree("abs-rootlevel");
+        let current = t.join("index.md");
+        let other = t.join("other.md");
+        touch(&other);
+
+        let resolved = resolve_target(base(&current, &t), "/other.md");
+        assert_eq!(expect_file(resolved), other);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn absolute_link_falls_back_to_literal_filesystem_path() {
+        let t = temp_tree("abs-literal");
+        let root = t.join("root");
+        let current = root.join("current.md");
+        let literal = t.join("elsewhere/real.go");
+        touch(&literal);
+
+        let target = literal.to_str().unwrap();
+        let resolved = resolve_target(base(&current, &root), target);
+        assert_eq!(expect_file(resolved), literal);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn bundle_root_wins_over_literal_filesystem_path() {
+        let t = temp_tree("abs-precedence");
+        let root = t.join("root");
+        let current = root.join("current.md");
+        let literal = t.join("elsewhere/real.md");
+        touch(&literal);
+        let mirror = root.join(literal.strip_prefix("/").unwrap());
+        touch(&mirror);
+
+        let target = literal.to_str().unwrap();
+        let resolved = resolve_target(base(&current, &root), target);
+        assert_eq!(expect_file(resolved), mirror);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn line_suffix_is_stripped_for_root_literal_and_relative() {
+        let t = temp_tree("abs-linesuffix");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let in_root = root.join("x/y.md");
+        touch(&in_root);
+        let literal = t.join("elsewhere/real.go");
+        touch(&literal);
+        let sibling = root.join("sub/y.go");
+        touch(&sibling);
+        let lit = literal.to_str().unwrap();
+
+        let b = base(&current, &root);
+        assert_eq!(expect_file(resolve_target(b, "/x/y.md:12")), in_root);
+        assert_eq!(
+            expect_file(resolve_target(b, &format!("{lit}:154"))),
+            literal
+        );
+        assert_eq!(
+            expect_file(resolve_target(b, &format!("{lit}:154:7"))),
+            literal
+        );
+        assert_eq!(expect_file(resolve_target(b, "./y.go:3")), sibling);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn absolute_link_fragment_is_dropped_before_resolving() {
+        let t = temp_tree("abs-fragment");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let wanted = root.join("x/y.md");
+        touch(&wanted);
+
+        let resolved = resolve_target(base(&current, &root), "/x/y.md#sec");
+        assert_eq!(expect_file(resolved), wanted);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn missing_absolute_link_is_not_found_at_root_joined_path() {
+        let t = temp_tree("abs-missing");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let b = base(&current, &root);
+        assert_eq!(
+            expect_not_found(resolve_target(b, "/nope.md")),
+            root.join("nope.md")
+        );
+        // Reported as written — the :LINE suffix is not stripped from the message.
+        assert_eq!(
+            expect_not_found(resolve_target(b, "/nope.go:3")),
+            root.join("nope.go:3")
+        );
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn relative_link_climbs_out_of_bundle_without_clamping() {
+        let t = temp_tree("rel-climb");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let outside = t.join("outside.md");
+        touch(&outside);
+        // `..` traversal only works through directories that exist.
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+
+        let resolved = resolve_target(base(&current, &root), "../../outside.md");
+        assert_eq!(expect_file(resolved), root.join("sub/../../outside.md"));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn strip_line_suffix_cases() {
+        assert_eq!(strip_line_suffix("a.go:154"), Some("a.go"));
+        assert_eq!(strip_line_suffix("a.go:154:7"), Some("a.go:154"));
+        assert_eq!(strip_line_suffix("a.md"), None);
+        assert_eq!(strip_line_suffix("a:b"), None);
+        assert_eq!(strip_line_suffix("a.go:"), None);
+        assert_eq!(strip_line_suffix(":12"), None);
+        assert_eq!(strip_line_suffix("foo:bar.md"), None);
+    }
+
+    #[test]
+    fn explicit_root_rejects_non_directory() {
+        let t = temp_tree("root-nondir");
+        let file = t.join("file.md");
+        touch(&file);
+
+        assert!(explicit_root(file).is_err());
+        assert!(explicit_root(t.join("missing")).is_err());
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn explicit_root_canonicalizes_path() {
+        let t = temp_tree("root-canon");
+        let nested = t.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let resolved = explicit_root(nested.join("..").join("b")).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&nested).unwrap());
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn protocol_relative_path_is_external() {
         let current = PathBuf::from("/tmp/current.md");
-        // A leading "//" is a protocol-relative URL, not the "single leading
-        // slash" case we reinterpret as file-dir-relative — it must not be
-        // stripped down to a relative path lookup (which could otherwise
-        // silently hit an unrelated local file with a matching name).
-        let resolved = resolve_target(&current, "//example.com/readme.md");
+        // A leading "//" is a protocol-relative URL, not a bundle-absolute
+        // path — it must not be looked up under the bundle root (which could
+        // otherwise silently hit an unrelated local file with a matching name).
+        let resolved = resolve_target(
+            base(&current, Path::new(UNUSED_ROOT)),
+            "//example.com/readme.md",
+        );
         assert_eq!(target_kind(resolved), "external");
     }
 
     #[test]
     fn missing_relative_path_is_not_found() {
         let current = PathBuf::from("/tmp/term-markdown-nonexistent-dir/current.md");
-        let resolved = resolve_target(&current, "./missing.md");
+        let resolved = resolve_target(base(&current, Path::new(UNUSED_ROOT)), "./missing.md");
         assert_eq!(target_kind(resolved), "not_found");
     }
 
     #[test]
     fn http_url_is_external() {
         let current = PathBuf::from("/tmp/current.md");
-        let resolved = resolve_target(&current, "https://example.com");
+        let resolved = resolve_target(
+            base(&current, Path::new(UNUSED_ROOT)),
+            "https://example.com",
+        );
         assert_eq!(target_kind(resolved), "external");
     }
 
     #[test]
     fn mailto_is_external() {
         let current = PathBuf::from("/tmp/current.md");
-        let resolved = resolve_target(&current, "mailto:someone@example.com");
+        let resolved = resolve_target(
+            base(&current, Path::new(UNUSED_ROOT)),
+            "mailto:someone@example.com",
+        );
         assert_eq!(target_kind(resolved), "external");
     }
 
     #[test]
     fn bare_fragment_is_anchor() {
         let current = PathBuf::from("/tmp/current.md");
-        let resolved = resolve_target(&current, "#some-heading");
+        let resolved = resolve_target(base(&current, Path::new(UNUSED_ROOT)), "#some-heading");
         match resolved {
             Target::Anchor(frag) => assert_eq!(frag, "some-heading"),
             _ => panic!("expected Anchor target"),
@@ -535,7 +851,7 @@ mod tests {
         // line 1: single short row
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file).unwrap();
+        let app = App::new(file, dir.clone()).unwrap();
         let starts = app.row_starts(10);
         // first logical line should take >1 row at this width
         assert!(starts[1] - starts[0] > 1);
@@ -550,11 +866,8 @@ mod tests {
         // the frontmatter-stripping and row-accounting fixes, clicking the
         // "rendering" link landed several rows off because the frontmatter
         // rendered as one giant wrapped heading.
-        let app = App::new(PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/docs/knowledge/index.md"
-        )))
-        .unwrap();
+        let knowledge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/knowledge"));
+        let app = App::new(knowledge.join("index.md"), knowledge).unwrap();
         let width = 78u16;
 
         let rendering_link = app
@@ -581,7 +894,7 @@ mod tests {
         let file = dir.join("doc.md");
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file).unwrap();
+        let app = App::new(file, dir.clone()).unwrap();
         let (line, sub_row) = app.line_at_row(0, 10).unwrap();
         assert_eq!((line, sub_row), (0, 0));
         let (line, sub_row) = app.line_at_row(1, 10).unwrap();
