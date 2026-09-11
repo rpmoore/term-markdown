@@ -31,7 +31,9 @@ fn walk_stop(start: &Path) -> Option<PathBuf> {
     if let Some(toplevel) = git_toplevel(start) {
         return toplevel.parent().map(Path::to_path_buf);
     }
-    let home = std::env::home_dir()?;
+    // Read `$HOME` directly: `std::env::home_dir` is deprecated on
+    // toolchains older than 1.87, and this crate's MSRV is 1.85.
+    let home = PathBuf::from(std::env::var_os("HOME")?);
     (start != home && start.starts_with(&home)).then_some(home)
 }
 
@@ -71,11 +73,12 @@ fn git_toplevel(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Whether `index` opens with a `---` frontmatter block that contains an
-/// `okf_version:` key. An unreadable file, no opening fence, or an unclosed
-/// fence (mirroring `markdown::strip_frontmatter`) all count as "no". The
-/// file is already in memory, so the scan for the closing fence is unbounded
-/// — a long `tags:` list must not hide the key.
+/// Whether `index` opens with a `---` frontmatter block that contains a
+/// top-level `okf_version:` key. An unreadable file, no opening fence, or an
+/// unclosed fence (mirroring `markdown::strip_frontmatter`) all count as
+/// "no", as does an indented `okf_version:` nested under another key or
+/// inside a block scalar. The file is already in memory, so the scan for the
+/// closing fence is unbounded — a long `tags:` list must not hide the key.
 fn declares_okf_version(index: &Path) -> bool {
     let Ok(source) = fs::read_to_string(index) else {
         return false;
@@ -89,7 +92,7 @@ fn declares_okf_version(index: &Path) -> bool {
         if line == "---" {
             return found;
         }
-        if line.trim_start().starts_with("okf_version:") {
+        if line.starts_with("okf_version:") {
             found = true;
         }
     }
@@ -246,6 +249,18 @@ mod tests {
             &format!("---\nokf_version: \"0.2\"\ntags:\n{tags}---\n# Root\n"),
         );
         assert!(declares_okf_version(&index));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn declares_okf_version_false_when_key_is_nested() {
+        let t = temp_tree("bundle-fm-nested");
+        let index = t.join("index.md");
+        touch(
+            &index,
+            "---\nmetadata:\n  okf_version: \"0.2\"\nnotes: |\n  okf_version: \"0.2\"\n---\n",
+        );
+        assert!(!declares_okf_version(&index));
         std::fs::remove_dir_all(&t).ok();
     }
 

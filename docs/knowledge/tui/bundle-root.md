@@ -27,19 +27,19 @@ override is `--root <dir>`. Detection runs once in `main` and the result is stor
    CLI path (`cargo run -- docs/knowledge/index.md`) has real ancestors and a symlinked entry point
    still finds the bundle it points into. This canonical path is used for *detection only*;
    `App.path` keeps the path the user typed.
-2. Start from the file's directory and compute a `stop` via `walk_stop` (`src/bundle.rs:30-36`): the
+2. Start from the file's directory and compute a `stop` via `walk_stop` (`src/bundle.rs:30-38`): the
    first ancestor the walk must **not** inspect.
    - Inside a git checkout (nearest ancestor with a `.git` entry — a directory, or a file for
-     worktrees/submodules; `git_toplevel`, `src/bundle.rs:67-72`, no shell-out): the *parent* of
+     worktrees/submodules; `git_toplevel`, `src/bundle.rs:69-74`, no shell-out): the *parent* of
      the toplevel, so the toplevel itself is still a candidate.
-   - Else, if the file is strictly under `$HOME`: `$HOME` itself, so a stray `~/index.md` can't
-     become the root of every file under the home directory.
+   - Else, if the file is strictly under `$HOME` (read from the environment): `$HOME` itself, so a
+     stray `~/index.md` can't become the root of every file under the home directory.
    - Else: none — walk all the way to `/`.
-3. `detect_root_bounded(start, stop)` (`src/bundle.rs:47-63`) walks `start.ancestors()`, breaking at
+3. `detect_root_bounded(start, stop)` (`src/bundle.rs:49-65`) walks `start.ancestors()`, breaking at
    `stop`, and returns:
-   1. the **nearest** directory whose `index.md` declares `okf_version` in its frontmatter
-      (`declares_okf_version`, `src/bundle.rs:79-97`) — the spec permits frontmatter only in the
-      bundle-root `index.md`, so this is definitive and the walk stops immediately;
+   1. the **nearest** directory whose `index.md` declares a *top-level* `okf_version` key in its
+      frontmatter (`declares_okf_version`, `src/bundle.rs:82-100`) — the spec permits frontmatter
+      only in the bundle-root `index.md`, so this is definitive and the walk stops immediately;
    2. otherwise the **outermost** directory (before `stop`) containing an `index.md` *file* — gaps
       are fine, a `plans/` without an `index.md` between two directories that have one doesn't end
       the walk;
@@ -50,7 +50,8 @@ override is `--root <dir>`. Detection runs once in `main` and the result is stor
 first line must be `---` (CRLF-tolerant — looser than `strip_frontmatter`, which affects only
 detection), it scans to the closing `---` (the file is already in memory, so a long `tags:` list
 can't hide the key), an unclosed fence counts as "no frontmatter" (matching `strip_frontmatter`),
-and a key that only appears in the body after the closing fence doesn't count.
+a key that only appears in the body after the closing fence doesn't count, and neither does an
+indented `okf_version:` nested under another key or inside a block scalar (column 0 only).
 
 ## Worked examples
 

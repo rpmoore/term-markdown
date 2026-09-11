@@ -116,7 +116,7 @@ fn resolve_target(base: LinkBase<'_>, target: &str) -> Target {
         // point at the host filesystem.
         let root = base.bundle_root.to_path_buf();
         probe(path_part, |p| {
-            vec![root.join(p.trim_start_matches('/')), PathBuf::from(p)]
+            vec![root.join(clamp_to_root(p)), PathBuf::from(p)]
         })
     } else {
         let dir = base
@@ -126,6 +126,23 @@ fn resolve_target(base: LinkBase<'_>, target: &str) -> Target {
             .to_path_buf();
         probe(path_part, |p| vec![dir.join(p)])
     }
+}
+
+/// `path` as a relative path with `.`/`..` segments resolved and clamped at
+/// the top, so a bundle-absolute `/../x.md` or `/a/../../x.md` still lands
+/// inside the bundle root rather than a sibling of it.
+fn clamp_to_root(path: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out
 }
 
 /// Return the first existing file among `candidates(path)`; failing that,
@@ -567,6 +584,35 @@ mod tests {
         assert_eq!(expect_file(resolved), wanted);
 
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn absolute_link_parent_segments_are_clamped_at_bundle_root() {
+        let t = temp_tree("abs-dotdot");
+        let root = t.join("root");
+        let current = root.join("sub/current.md");
+        let inside = root.join("guide.md");
+        touch(&inside);
+        // Decoy: what an unclamped `<root>/../guide.md` would open.
+        touch(&t.join("guide.md"));
+
+        let b = base(&current, &root);
+        assert_eq!(expect_file(resolve_target(b, "/../guide.md")), inside);
+        assert_eq!(
+            expect_file(resolve_target(b, "/sub/../../guide.md")),
+            inside
+        );
+        assert_eq!(expect_file(resolve_target(b, "/./guide.md")), inside);
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn clamp_to_root_cases() {
+        assert_eq!(clamp_to_root("/x/y.md"), PathBuf::from("x/y.md"));
+        assert_eq!(clamp_to_root("/../x.md"), PathBuf::from("x.md"));
+        assert_eq!(clamp_to_root("/a/../b/./c.md"), PathBuf::from("b/c.md"));
+        assert_eq!(clamp_to_root("/a//b.md"), PathBuf::from("a/b.md"));
     }
 
     #[test]
