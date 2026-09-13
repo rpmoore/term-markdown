@@ -1,5 +1,6 @@
 mod bundle;
 mod markdown;
+mod scheme;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -18,12 +19,12 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use markdown::Link;
+use scheme::Scheme;
 
 /// How many terminal rows `text` occupies once word-wrapped at `width`
 /// columns, matching ratatui's `Wrap { trim: false }` behavior closely
@@ -69,6 +70,10 @@ struct Args {
     /// Bundle root for absolute (`/x/y.md`) links; auto-detected when omitted
     #[arg(long, value_name = "DIR")]
     root: Option<PathBuf>,
+
+    /// Color scheme to use, overriding ~/.term-markdown/config.toml
+    #[arg(long, value_name = "NAME")]
+    scheme: Option<String>,
 }
 
 /// Where a link points: relative paths resolve against the file it appeared
@@ -176,6 +181,8 @@ struct App {
     path: PathBuf,
     /// Base for absolute links; fixed at startup, never changed by `load`.
     bundle_root: PathBuf,
+    /// Active color scheme; fixed at startup, never changed by `load`.
+    scheme: Scheme,
     body: Text<'static>,
     links: Vec<Link>,
     scroll: u16,
@@ -185,10 +192,11 @@ struct App {
 }
 
 impl App {
-    fn new(path: PathBuf, bundle_root: PathBuf) -> Result<Self> {
+    fn new(path: PathBuf, bundle_root: PathBuf, scheme: Scheme) -> Result<Self> {
         let mut app = App {
             path: PathBuf::new(),
             bundle_root,
+            scheme,
             body: Text::default(),
             links: Vec::new(),
             scroll: 0,
@@ -203,7 +211,7 @@ impl App {
     fn load(&mut self, path: PathBuf) -> Result<()> {
         let source = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let rendered = markdown::render(&source);
+        let rendered = markdown::render(&source, &self.scheme);
         self.path = path;
         self.body = rendered.text;
         self.links = rendered.links;
@@ -348,7 +356,12 @@ fn main() -> Result<()> {
         Some(root) => explicit_root(root)?,
         None => bundle::detect_root(&args.file).context("failed to detect bundle root")?,
     };
-    let mut app = App::new(args.file, bundle_root)?;
+    let scheme = Scheme::load(
+        scheme::default_config_path().as_deref(),
+        args.scheme.as_deref(),
+    )
+    .context("failed to load color scheme")?;
+    let mut app = App::new(args.file, bundle_root, scheme)?;
 
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, &mut app);
@@ -402,19 +415,29 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
 
             app.scroll = app.scroll.min(app.max_scroll(body_height, content_width));
 
+            if let Some(bg) = app.scheme.ui.background {
+                frame.render_widget(Block::default().style(bg), frame.area());
+            }
+
             let mut text = app.body.clone();
             if let Some(idx) = app.selected_link {
                 let link = &app.links[idx];
                 if let Some(line) = text.lines.get_mut(link.line) {
                     for span in &mut line.spans[link.span_start..link.span_end] {
-                        span.style = span.style.add_modifier(Modifier::REVERSED);
+                        span.style = span.style.patch(app.scheme.ui.selection);
                     }
                 }
             }
 
-            let block = Block::default()
+            let mut block = Block::default()
                 .borders(Borders::ALL)
                 .title(app.path.display().to_string());
+            if let Some(border_style) = app.scheme.ui.border {
+                block = block.border_style(border_style);
+            }
+            if let Some(title_style) = app.scheme.ui.title {
+                block = block.title_style(title_style);
+            }
             let paragraph = Paragraph::new(text)
                 .block(block)
                 .wrap(Wrap { trim: false })
@@ -428,7 +451,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                 None => format!(" line {}/{}  |  {}", app.scroll, max, hint),
             };
             frame.render_widget(
-                Paragraph::new(Line::from(status_text)).style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new(Line::from(status_text)).style(app.scheme.ui.status_bar),
                 chunks[1],
             );
         })?;
@@ -851,7 +874,7 @@ mod tests {
         // line 1: single short row
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone()).unwrap();
+        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let starts = app.row_starts(10);
         // first logical line should take >1 row at this width
         assert!(starts[1] - starts[0] > 1);
@@ -867,7 +890,12 @@ mod tests {
         // "rendering" link landed several rows off because the frontmatter
         // rendered as one giant wrapped heading.
         let knowledge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/knowledge"));
-        let app = App::new(knowledge.join("index.md"), knowledge).unwrap();
+        let app = App::new(
+            knowledge.join("index.md"),
+            knowledge,
+            Scheme::default_builtin(),
+        )
+        .unwrap();
         let width = 78u16;
 
         let rendering_link = app
@@ -894,7 +922,7 @@ mod tests {
         let file = dir.join("doc.md");
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone()).unwrap();
+        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let (line, sub_row) = app.line_at_row(0, 10).unwrap();
         assert_eq!((line, sub_row), (0, 0));
         let (line, sub_row) = app.line_at_row(1, 10).unwrap();
