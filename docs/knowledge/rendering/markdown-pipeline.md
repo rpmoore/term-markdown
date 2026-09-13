@@ -24,7 +24,7 @@ untouched (it's a thematic break, not frontmatter). Every concept doc under `doc
 (e.g. this file) carries frontmatter, so this runs on every concept-doc render — the area
 `index.md` files have none (OKF spec §8), so there's nothing for it to strip there. It runs a
 single pass over `pulldown_cmark::Parser` events and builds a `Vec<Line<'static>>`, returned as
-`Text::from(lines)` (`src/markdown.rs:256`).
+`Text::from(lines)` (`src/markdown.rs:352`).
 
 ## Style stack
 
@@ -34,12 +34,12 @@ cell) pushes a derived `Style` onto the stack; the matching `Event::End` pops it
 (`Event::Text`) is pushed as a `Span` styled with `*style_stack.last().unwrap()` — the stack
 must never be popped empty, since every push has a matching pop keyed to the same tag. Elements
 that carry a scheme color/modifier combine it with the inherited style via `Style::patch` (e.g.
-`style.patch(scheme.markdown.heading_h1)`, `src/markdown.rs:157`) rather than replacing it
+`style.patch(scheme.markdown.heading_h1)`, `src/markdown.rs:158`) rather than replacing it
 outright, so a colored element nested inside another (e.g. a link inside emphasis) keeps both.
 
 Heading level maps to color only, not depth-dependent indent: H1 → `scheme.markdown.heading_h1`,
 H2 → `scheme.markdown.heading_h2`, H3+ → `scheme.markdown.heading_h3`
-(`src/markdown.rs:151-157`). The built-in default scheme reproduces the original hardcoded
+(`src/markdown.rs:152-158`). The built-in default scheme reproduces the original hardcoded
 values (yellow/cyan/magenta, bold).
 
 ## Line buffering
@@ -58,7 +58,7 @@ counter, or `"• "`, styled with `scheme.markdown.list_marker`.
 
 ## Fenced code blocks
 
-Inline code (single backtick, `Event::Code`, `src/markdown.rs:295`) is rendered directly as a
+Inline code (single backtick, `Event::Code`, `src/markdown.rs:306`) is rendered directly as a
 span styled with `scheme.markdown.code_inline` — it does not go through syntect.
 
 Fenced/indented code blocks are buffered, not streamed: `Tag::CodeBlock` sets `in_code_block =
@@ -89,12 +89,12 @@ Fence lines (`` ```lang `` / `` ``` ``) are emitted as `Line`s styled with
 Vec<Link>` records every markdown link found, each located by `(line, span_start, span_end)`
 into the returned `Text`'s `Line::spans`, not by screen column: column position depends on
 wrapping/scroll, so it's cheap to recompute on demand instead (see `link_col_range`,
-`src/markdown.rs:349`, used only for mouse hit-testing).
+`src/markdown.rs:360`, used only for mouse hit-testing).
 
 `Tag::Link { dest_url, .. }` pushes `style.patch(scheme.markdown.link)` and `(current.len(),
-dest_url)` onto `link_stack` (`src/markdown.rs:214-216`); `TagEnd::Link` pops it, and if the
+dest_url)` onto `link_stack` (`src/markdown.rs:215-217`); `TagEnd::Link` pops it, and if the
 link's text produced at least one span (`span_end > span_start`), stages `(span_start, span_end,
-target)` into `pending_links` (`src/markdown.rs:269-275`). Staged links resolve to a concrete
+target)` into `pending_links` (`src/markdown.rs:275-283`). Staged links resolve to a concrete
 line index only at the next `flush_line` call (`src/markdown.rs:82-98`), since a link's owning
 `current`/`Line` may not be flushed until later in the same block (e.g. more text after the
 link, before the paragraph ends) — `pending_links` is drained into `links` at that flush,
@@ -102,17 +102,25 @@ stamped with `lines.len()` (the index the flushed line is about to occupy). This
 link's start and end always fall within one `flush_line`-delimited segment (true today: nothing
 flushes mid-link since link contents are inline-only, no block-level breaks).
 
-Images (`Tag::Image`, `src/markdown.rs:218`) are styled with `scheme.markdown.image_alt` but not
+Images (`Tag::Image`, `src/markdown.rs:219`) are styled with `scheme.markdown.image_alt` but not
 tracked as links — not navigable targets for a file viewer.
+
+## Tables
+
+Table rendering (`Tag::TableHead | TableRow | TableCell`, `src/markdown.rs:220-231, 287-295`)
+adds a two-space separator per cell and, since `table_header_bold` names a *header* setting, only
+bolds cells inside the header row: an `in_table_head` flag is set on `Tag::TableHead` and cleared
+on `TagEnd::TableHead` (`src/markdown.rs:221, 288`), and `Tag::TableCell` only applies
+`Modifier::BOLD` when both `in_table_head` and `scheme.markdown.table_header_bold` are true
+(`src/markdown.rs:225-231`) — body-row cells (`Tag::TableRow`) never get the header style. It
+still does not align columns or draw borders — cells just run together in reading order with no
+`Tag::Table` grid handling.
 
 ## Known gap
 
-Table rendering (`Tag::TableHead | TableRow | TableCell`, `src/markdown.rs:219-224, 281-283`)
-conditionally adds bold styling (`scheme.markdown.table_header_bold`) and a two-space separator
-per cell but does not align columns or draw borders — cells just run together in reading order
-with no `Tag::Table` grid handling. `pulldown_cmark::Parser::new` (`src/markdown.rs:147`) is
-called with default `Options`, which do not enable the `ENABLE_TABLES` extension, so these
-table-tag branches are currently unreachable in practice — table syntax renders as plain
-paragraph text instead. Fixing this (enabling the extension) is out of scope for the
-color-scheme work; noted here since `table_header_bold` in a scheme file has no visible effect
-until it is.
+`pulldown_cmark::Parser::new` (`src/markdown.rs:148`) is called with default `Options`, which do
+not enable the `ENABLE_TABLES` extension, so none of the table-tag branches above currently fire
+in practice — table syntax renders as plain paragraph text instead. Fixing this (enabling the
+extension) is out of scope for the color-scheme work; noted here since `table_header_bold` in a
+scheme file has no visible effect, and the header-vs-body bold distinction above is untested
+through `render()`, until it is.

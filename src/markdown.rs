@@ -131,6 +131,7 @@ pub fn render(source: &str, scheme: &Scheme) -> Rendered {
     let mut list_stack: Vec<Option<u64>> = Vec::new();
 
     let mut in_code_block = false;
+    let mut in_table_head = false;
     let mut code_lang = String::new();
     let mut code_buffer = String::new();
 
@@ -216,12 +217,17 @@ pub fn render(source: &str, scheme: &Scheme) -> Rendered {
                     link_stack.push((current.len(), dest_url.to_string()));
                 }
                 Tag::Image { .. } => style_stack.push(style.patch(scheme.markdown.image_alt)),
-                Tag::TableHead | Tag::TableRow | Tag::TableCell => {
-                    let mut table_style = style;
-                    if scheme.markdown.table_header_bold {
-                        table_style = table_style.add_modifier(Modifier::BOLD);
+                Tag::TableHead => {
+                    in_table_head = true;
+                    style_stack.push(style);
+                }
+                Tag::TableRow => style_stack.push(style),
+                Tag::TableCell => {
+                    let mut cell_style = style;
+                    if in_table_head && scheme.markdown.table_header_bold {
+                        cell_style = cell_style.add_modifier(Modifier::BOLD);
                     }
-                    style_stack.push(table_style);
+                    style_stack.push(cell_style);
                 }
                 _ => {}
             },
@@ -278,7 +284,12 @@ pub fn render(source: &str, scheme: &Scheme) -> Rendered {
                 TagEnd::Image => {
                     style_stack.pop();
                 }
-                TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell => {
+                TagEnd::TableHead => {
+                    in_table_head = false;
+                    style_stack.pop();
+                    push_span(&mut current, "  ".to_string(), style);
+                }
+                TagEnd::TableRow | TagEnd::TableCell => {
                     style_stack.pop();
                     push_span(&mut current, "  ".to_string(), style);
                 }
