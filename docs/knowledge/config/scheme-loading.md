@@ -17,10 +17,10 @@ entry point, called once from `main` (`src/main.rs`) before `App` is constructed
 
 `~/.term-markdown/config.toml` names the active scheme (`scheme = "name"`); scheme files live in
 a **fixed sibling directory** next to the config file, `~/.term-markdown/schemes/<name>.toml`
-(`scheme_path_for`, `src/scheme.rs:276-283`) — a direct `config_path.parent().join("schemes")`
+(`scheme_path_for`, `src/scheme.rs:295-301`) — a direct `config_path.parent().join("schemes")`
 join, not an ancestor walk like `bundle::detect_root` (see
 [bundle-root](../tui/bundle-root.md)); the two are unrelated lookups that happen to share the
-"find a file relative to another" shape. `default_config_path()` (`src/scheme.rs:265-269`)
+"find a file relative to another" shape. `default_config_path()` (`src/scheme.rs:266-273`)
 resolves `~` by reading the `$HOME` env var directly, the same pattern (and same MSRV reasoning
 — `std::env::home_dir` deprecated below 1.87, crate MSRV 1.85) as `bundle::walk_stop`; it
 deliberately doesn't add a `dirs`/`directories` dependency, since this app only ever needs
@@ -29,24 +29,31 @@ deliberately doesn't add a `dirs`/`directories` dependency, since this app only 
 ## Resolution precedence and error handling
 
 Precedence: `--scheme NAME` CLI flag (`cli_override`) → `config.toml`'s `scheme` key → the
-built-in default. `Scheme::load` (`src/scheme.rs:234-256`):
+built-in default. `Scheme::load` (`src/scheme.rs:234-259`):
 
-1. Reads `config.toml` via `read_config` (`src/scheme.rs:287-299`) — `Ok(None)` if the file
+1. Reads `config.toml` via `read_config` (`src/scheme.rs:306-318`) — `Ok(None)` if the file
    doesn't exist (normal, not an error), `Err` if it exists but isn't valid TOML.
 2. Picks `name` from `cli_override`, else the config's `scheme` key, else the literal string
-   `"default"`.
-3. If `config_path` is `None` (no `$HOME`) and no CLI override was given, falls back to
-   `Scheme::default_builtin()` directly. If a CLI override *was* given with no `$HOME`
-   resolvable, that's a hard error (a scheme dir has nowhere to be sought), not a silent
-   fallback.
+   `"default"`, then validates it via `validate_scheme_name` (`src/scheme.rs:279-291`) —
+   rejects an empty name, `.`/`..`, or anything containing `/`/`\`, since `scheme_path_for` does
+   a plain path join with no clamping (unlike `main.rs`'s `clamp_to_root`, which handles the
+   equivalent problem for bundle-relative links). This runs even for the `"default"` sentinel,
+   though it trivially passes.
+3. If `config_path` is `None` (no `$HOME`) and `name` isn't `"default"`, that's a hard error (a
+   scheme dir has nowhere to be sought) — a CLI override of `"default"` with no `$HOME` still
+   falls back to `Scheme::default_builtin()`, since it's a no-op equivalent to omitting
+   `--scheme` entirely.
 4. If `name == "default"` and `schemes/default.toml` doesn't exist on disk, uses
    `Scheme::default_builtin()` — the zero-config path: a fresh install with no
    `~/.term-markdown/` at all works immediately, with rendering identical to the original
    hardcoded colors.
-5. Otherwise (`load_scheme_file`, `src/scheme.rs:301-307`) reads and parses the named scheme
+5. Otherwise (`load_scheme_file`, `src/scheme.rs:320-326`) reads and parses the named scheme
    file and **hard-fails** (via `anyhow::Context`, naming the exact path/field) on: a missing
-   named scheme file, malformed scheme TOML, an unparseable color string, or an unknown
-   `syntect_theme` name. This mirrors `main.rs`'s existing convention of hard-failing on
+   named scheme file, malformed scheme TOML, an unparseable color string, an unknown
+   `syntect_theme` name, or an out-of-range `horizontal_rule_width`/empty
+   `horizontal_rule_glyph` (`src/scheme.rs:344-353` — bounded to `[1, 1000]` and non-empty so a
+   fat-fingered width can't blow up `String::repeat`, and a width/glyph of zero can't silently
+   render an invisible rule). This mirrors `main.rs`'s existing convention of hard-failing on
    explicit-but-wrong input (e.g. `--root` validation) — an absent config/scheme is normal, but
    a named one that's broken is not silently ignored. Because `anyhow::Error`'s `Display` only
    shows the outermost context message, tests and callers that need the full chain (e.g. to
@@ -82,7 +89,7 @@ meaning "inherit the terminal's/ratatui's default rendering" — resolved to `Op
 `syntect::highlighting::ThemeSet::load_defaults`'s bundled themes (`base16-ocean.dark`,
 `base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized
 (dark)`, `Solarized (light)`). It's resolved to an owned `Theme` once in `resolve()`
-(`src/scheme.rs:309-360`, theme lookup at `src/scheme.rs:315-323`) and stored as
+(`src/scheme.rs:328-393`, theme lookup at `src/scheme.rs:333-342`) and stored as
 `Scheme.syntax_theme`, not re-loaded per `render()` call — `markdown::render` and
 `highlight_code_block` just borrow `&scheme.syntax_theme` (see
 [markdown-pipeline](../rendering/markdown-pipeline.md)). An unknown theme name is a hard error
@@ -90,7 +97,7 @@ at load time, not a lazy failure inside the render loop.
 
 ## Built-in default and the example asset
 
-`Scheme::default_builtin()` (`src/scheme.rs:185-232`) is a hardcoded Rust literal reproducing
+`Scheme::default_builtin()` (`src/scheme.rs:185-224`) is a hardcoded Rust literal reproducing
 term-markdown's original colors exactly (yellow/cyan/magenta headings, `base16-ocean.dark`
 syntect theme, etc.) — used whenever no config/scheme file resolves (see Resolution precedence
 above). `assets/schemes/default.toml` is a human-readable, doc-only copy of the same values,
