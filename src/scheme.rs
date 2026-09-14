@@ -262,11 +262,29 @@ impl Scheme {
         };
 
         let scheme_path = scheme_path_for(config_path, &name);
-        if name == DEFAULT_SCHEME_NAME && !scheme_path.is_file() {
+        if name == DEFAULT_SCHEME_NAME && !default_scheme_file_exists(&scheme_path)? {
             return Ok(Scheme::default_builtin());
         }
 
         load_scheme_file(&scheme_path)
+    }
+}
+
+/// Whether `path` exists as a regular file, for the `"default"`-scheme
+/// existence check. Unlike `Path::is_file()`, which silently reports `false`
+/// for any metadata failure (permission denied, a broken symlink) or when
+/// the path is a directory, this treats anything other than "doesn't exist"
+/// as a hard error — an existing-but-broken `schemes/default.toml` must not
+/// be silently ignored in favor of the built-in default.
+fn default_scheme_file_exists(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => bail!(
+            "expected a file at {} but found something else (e.g. a directory)",
+            path.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("failed to check scheme file {}", path.display())),
     }
 }
 
@@ -474,6 +492,21 @@ mod tests {
             scheme.markdown.heading_h1,
             Scheme::default_builtin().markdown.heading_h1
         );
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn default_scheme_path_that_is_a_directory_is_a_hard_error() {
+        // An existing-but-broken schemes/default.toml (here: a directory
+        // instead of a file) must not be silently swallowed into the
+        // built-in-default fallback the way a genuinely absent file is.
+        let t = temp_tree("default-scheme-is-dir");
+        let config_path = t.join("config.toml");
+        std::fs::create_dir_all(t.join("schemes/default.toml")).unwrap();
+
+        let err = Scheme::load(Some(&config_path), None).unwrap_err();
+        assert!(err.to_string().contains("default.toml"));
 
         std::fs::remove_dir_all(&t).ok();
     }
