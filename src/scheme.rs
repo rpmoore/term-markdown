@@ -24,7 +24,7 @@ const DEFAULT_SCHEME_NAME: &str = "default";
 /// A single styled element, deserialized from a scheme TOML inline table
 /// like `{ fg = "yellow", bold = true }`. Every sub-field is optional.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct StyleSpec {
     fg: Option<String>,
     bg: Option<String>,
@@ -93,6 +93,7 @@ impl UiField {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MarkdownColors {
     heading_h1: StyleSpec,
     heading_h2: StyleSpec,
@@ -113,6 +114,7 @@ struct MarkdownColors {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UiColors {
     background: UiField,
     border: UiField,
@@ -122,6 +124,7 @@ struct UiColors {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SchemeFile {
     /// Informational only; not read back anywhere.
     #[serde(default)]
@@ -132,6 +135,7 @@ struct SchemeFile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigFile {
     scheme: Option<String>,
 }
@@ -638,6 +642,50 @@ mod tests {
 
         let err = Scheme::load(Some(&config_path), None).unwrap_err();
         assert!(format!("{err:#}").contains("horizontal_rule_glyph"));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn unknown_field_in_markdown_table_is_a_hard_error() {
+        let t = temp_tree("unknown-markdown-field");
+        let config_path = t.join("config.toml");
+        touch(&config_path, "scheme = \"typo\"\n");
+        // "boldd" instead of "bold" inside heading_h1's inline table.
+        let bad = VALID_SCHEME.replace(
+            "heading_h1        = { fg = \"red\", bold = true }",
+            "heading_h1        = { fg = \"red\", boldd = true }",
+        );
+        touch(&t.join("schemes/typo.toml"), &bad);
+
+        let err = Scheme::load(Some(&config_path), None).unwrap_err();
+        assert!(format!("{err:#}").contains("boldd"));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn unknown_top_level_field_in_scheme_file_is_a_hard_error() {
+        let t = temp_tree("unknown-toplevel-field");
+        let config_path = t.join("config.toml");
+        touch(&config_path, "scheme = \"typo\"\n");
+        let bad = format!("extra_section = true\n{VALID_SCHEME}");
+        touch(&t.join("schemes/typo.toml"), &bad);
+
+        let err = Scheme::load(Some(&config_path), None).unwrap_err();
+        assert!(format!("{err:#}").contains("extra_section"));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn unknown_key_in_config_toml_is_a_hard_error() {
+        let t = temp_tree("unknown-config-key");
+        let config_path = t.join("config.toml");
+        touch(&config_path, "scheem = \"typo\"\n");
+
+        let err = Scheme::load(Some(&config_path), None).unwrap_err();
+        assert!(format!("{err:#}").contains("scheem"));
 
         std::fs::remove_dir_all(&t).ok();
     }
