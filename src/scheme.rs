@@ -11,7 +11,7 @@
 //! error naming the offending path. Pure filesystem + parsing — no terminal
 //! I/O.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
@@ -284,15 +284,21 @@ pub fn default_config_path() -> Option<PathBuf> {
 }
 
 /// Rejects a scheme name that would escape the `schemes/` directory once
-/// joined with `.toml` (e.g. `../../etc/passwd` or an absolute path) —
-/// `scheme_path_for` does a plain path join with no clamping, so this must
-/// run first on any config/CLI-supplied name.
+/// joined with `.toml` (e.g. `../../etc/passwd`, an absolute path, or a
+/// Windows drive-relative name like `C:evil`) — `scheme_path_for` does a
+/// plain path join with no clamping, so this must run first on any
+/// config/CLI-supplied name. Checks both that `name` parses as exactly one
+/// `Component::Normal` (rejects `.`/`..`/root/prefix components — the
+/// portable way to catch platform-specific quirks like Windows drive
+/// prefixes) and that it contains no literal `/`/`\` (belt-and-suspenders:
+/// `\` isn't a separator in a Unix build's `Component` parsing, so it
+/// wouldn't be caught by the first check alone when compiled there).
 fn validate_scheme_name(name: &str) -> Result<()> {
-    let is_plain_segment = !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\');
+    let mut components = Path::new(name).components();
+    let is_single_normal_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    let is_plain_segment =
+        is_single_normal_component && !name.contains('/') && !name.contains('\\');
     if !is_plain_segment {
         bail!(
             "invalid scheme name {name:?}: must be a plain name with no path separators or \"..\""
@@ -603,6 +609,32 @@ mod tests {
     fn cli_scheme_name_with_slash_is_rejected() {
         let err = Scheme::load(None, Some("sub/dir")).unwrap_err();
         assert!(err.to_string().contains("invalid scheme name"));
+    }
+
+    #[test]
+    fn validate_scheme_name_accepts_plain_names() {
+        assert!(validate_scheme_name("default").is_ok());
+        assert!(validate_scheme_name("my-scheme_1").is_ok());
+    }
+
+    #[test]
+    fn validate_scheme_name_rejects_dot_and_dotdot() {
+        assert!(validate_scheme_name(".").is_err());
+        assert!(validate_scheme_name("..").is_err());
+    }
+
+    #[test]
+    fn validate_scheme_name_rejects_backslash() {
+        // Not a path separator under a Unix build's `Component` parsing, so
+        // this must be caught by the explicit character check, not just
+        // `Path::components()`.
+        assert!(validate_scheme_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn validate_scheme_name_rejects_root_and_empty() {
+        assert!(validate_scheme_name("/").is_err());
+        assert!(validate_scheme_name("").is_err());
     }
 
     #[test]

@@ -8,7 +8,7 @@ tags: [config, toml, color-scheme, ratatui, syntect]
 
 # Color scheme config and loading
 
-`Scheme::load(config_path, cli_override) -> Result<Scheme>` (`src/scheme.rs:238`) is the sole
+`Scheme::load(config_path, cli_override) -> Result<Scheme>` (`src/scheme.rs:245`) is the sole
 entry point, called once from `main` (`src/main.rs`) before `App` is constructed. The resulting
 `Scheme` is stored on `App` for the process lifetime — no live-reload, no in-app switching (see
 [app-loop](../tui/app-loop.md)). It's a pure filesystem + TOML-parsing module; no terminal I/O.
@@ -17,10 +17,10 @@ entry point, called once from `main` (`src/main.rs`) before `App` is constructed
 
 `~/.term-markdown/config.toml` names the active scheme (`scheme = "name"`); scheme files live in
 a **fixed sibling directory** next to the config file, `~/.term-markdown/schemes/<name>.toml`
-(`scheme_path_for`, `src/scheme.rs:299-305`) — a direct `config_path.parent().join("schemes")`
+(`scheme_path_for`, `src/scheme.rs:312-318`) — a direct `config_path.parent().join("schemes")`
 join, not an ancestor walk like `bundle::detect_root` (see
 [bundle-root](../tui/bundle-root.md)); the two are unrelated lookups that happen to share the
-"find a file relative to another" shape. `default_config_path()` (`src/scheme.rs:270-277`)
+"find a file relative to another" shape. `default_config_path()` (`src/scheme.rs:277-284`)
 resolves `~` by reading the `$HOME` env var directly, the same pattern (and same MSRV reasoning
 — `std::env::home_dir` deprecated below 1.87, crate MSRV 1.85) as `bundle::walk_stop`; it
 deliberately doesn't add a `dirs`/`directories` dependency, since this app only ever needs
@@ -29,16 +29,19 @@ deliberately doesn't add a `dirs`/`directories` dependency, since this app only 
 ## Resolution precedence and error handling
 
 Precedence: `--scheme NAME` CLI flag (`cli_override`) → `config.toml`'s `scheme` key → the
-built-in default. `Scheme::load` (`src/scheme.rs:238-263`):
+built-in default. `Scheme::load` (`src/scheme.rs:245-270`):
 
-1. Reads `config.toml` via `read_config` (`src/scheme.rs:310-322`) — `Ok(None)` if the file
+1. Reads `config.toml` via `read_config` (`src/scheme.rs:323-335`) — `Ok(None)` if the file
    doesn't exist (normal, not an error), `Err` if it exists but isn't valid TOML.
 2. Picks `name` from `cli_override`, else the config's `scheme` key, else the literal string
-   `"default"`, then validates it via `validate_scheme_name` (`src/scheme.rs:283-295`) —
-   rejects an empty name, `.`/`..`, or anything containing `/`/`\`, since `scheme_path_for` does
-   a plain path join with no clamping (unlike `main.rs`'s `clamp_to_root`, which handles the
-   equivalent problem for bundle-relative links). This runs even for the `"default"` sentinel,
-   though it trivially passes.
+   `"default"`, then validates it via `validate_scheme_name` (`src/scheme.rs:296-308`) — checks
+   both that `name` parses as exactly one `Path::components()` entry of `Component::Normal`
+   (rejects an empty name, `.`/`..`, a root, or a Windows drive-prefix like `C:evil`) and that it
+   contains no literal `/`/`\` (the portable belt-and-suspenders check — `\` isn't a separator
+   under a Unix build's `Component` parsing, so it wouldn't be caught by the first check alone
+   when compiled there), since `scheme_path_for` does a plain path join with no clamping (unlike
+   `main.rs`'s `clamp_to_root`, which handles the equivalent problem for bundle-relative links).
+   This runs even for the `"default"` sentinel, though it trivially passes.
 3. If `config_path` is `None` (no `$HOME`) and `name` isn't `"default"`, that's a hard error (a
    scheme dir has nowhere to be sought) — a CLI override of `"default"` with no `$HOME` still
    falls back to `Scheme::default_builtin()`, since it's a no-op equivalent to omitting
@@ -53,11 +56,11 @@ built-in default. `Scheme::load` (`src/scheme.rs:238-263`):
    "Absent config falls back to the built-in default" is true only in the sense that omitting
    `config.toml` always resolves `name` to `"default"` — it does not by itself guarantee
    `default_builtin()` is what actually renders.
-5. Otherwise (`load_scheme_file`, `src/scheme.rs:324-330`) reads and parses the named scheme
+5. Otherwise (`load_scheme_file`, `src/scheme.rs:337-343`) reads and parses the named scheme
    file and **hard-fails** (via `anyhow::Context`, naming the exact path/field) on: a missing
    named scheme file, malformed scheme TOML, an unparseable color string, an unknown
    `syntect_theme` name, or an out-of-range `horizontal_rule_width`/empty
-   `horizontal_rule_glyph` (`src/scheme.rs:348-357` — bounded to `[1, 1000]` and non-empty so a
+   `horizontal_rule_glyph` (`src/scheme.rs:361-370` — bounded to `[1, 1000]` and non-empty so a
    fat-fingered width can't blow up `String::repeat`, and a width/glyph of zero can't silently
    render an invisible rule). This mirrors `main.rs`'s existing convention of hard-failing on
    explicit-but-wrong input (e.g. `--root` validation) — an absent config/scheme is normal, but
@@ -102,7 +105,7 @@ meaning "inherit the terminal's/ratatui's default rendering" — resolved to `Op
 `syntect::highlighting::ThemeSet::load_defaults`'s bundled themes (`base16-ocean.dark`,
 `base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized
 (dark)`, `Solarized (light)`). It's resolved to an owned `Theme` once in `resolve()`
-(`src/scheme.rs:332-397`, theme lookup at `src/scheme.rs:337-346`) and stored as
+(`src/scheme.rs:345-410`, theme lookup at `src/scheme.rs:350-359`) and stored as
 `Scheme.syntax_theme`, not re-loaded per `render()` call — `markdown::render` and
 `highlight_code_block` just borrow `&scheme.syntax_theme` (see
 [markdown-pipeline](../rendering/markdown-pipeline.md)). An unknown theme name is a hard error
