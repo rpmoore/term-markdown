@@ -46,7 +46,13 @@ built-in default. `Scheme::load` (`src/scheme.rs:238-263`):
 4. If `name == "default"` and `schemes/default.toml` doesn't exist on disk, uses
    `Scheme::default_builtin()` — the zero-config path: a fresh install with no
    `~/.term-markdown/` at all works immediately, with rendering identical to the original
-   hardcoded colors.
+   hardcoded colors. **This check is independent of whether `config.toml` itself exists** — if
+   `schemes/default.toml` is present but `config.toml` is not, that file is still used (step 5
+   below), not the compiled-in default. This is deliberate, not an oversight: it lets a user
+   reskin the default look by dropping one file, with no `config.toml` boilerplate required.
+   "Absent config falls back to the built-in default" is true only in the sense that omitting
+   `config.toml` always resolves `name` to `"default"` — it does not by itself guarantee
+   `default_builtin()` is what actually renders.
 5. Otherwise (`load_scheme_file`, `src/scheme.rs:324-330`) reads and parses the named scheme
    file and **hard-fails** (via `anyhow::Context`, naming the exact path/field) on: a missing
    named scheme file, malformed scheme TOML, an unparseable color string, an unknown

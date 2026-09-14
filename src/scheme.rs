@@ -230,11 +230,18 @@ impl Scheme {
     /// Resolve the active scheme: `cli_override` (from `--scheme`) wins over
     /// `config_path`'s `scheme` key, which wins over the built-in default.
     ///
-    /// An absent config file, or `scheme = "default"` with no matching file
-    /// on disk, is not an error and falls back to
-    /// [`Scheme::default_builtin`]. A config/scheme file that exists but is
-    /// invalid, or a named scheme file that's missing, is a hard error
-    /// naming the offending path.
+    /// The effective scheme name always resolves to `"default"` when there's
+    /// no config file and no CLI override — but that alone doesn't guarantee
+    /// [`Scheme::default_builtin`] is used: if `schemes/default.toml` exists
+    /// next to where `config_path` *would* be (even with no `config.toml`
+    /// there at all), it's loaded instead. This is deliberate — it lets a
+    /// user reskin the default look by dropping a single file, with no
+    /// `config.toml` boilerplate required — not an accidental fallback.
+    /// `Scheme::default_builtin` is used only when no such file is present
+    /// (the true zero-config case) or `$HOME` can't be resolved at all. A
+    /// config/scheme file that exists but is invalid, or a named
+    /// (non-`"default"`) scheme file that's missing, is a hard error naming
+    /// the offending path.
     pub fn load(config_path: Option<&Path>, cli_override: Option<&str>) -> Result<Scheme> {
         let config = match config_path {
             Some(path) => read_config(path)?,

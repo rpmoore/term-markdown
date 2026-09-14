@@ -658,18 +658,13 @@ mod tests {
 
         let line_text =
             |line: &Line<'_>| -> String { line.spans.iter().map(|s| s.content.as_ref()).collect() };
-        let header_line = rendered
-            .text
-            .lines
-            .iter()
-            .find(|l| line_text(l).contains("Key"))
-            .expect("header line present");
-        let body_line = rendered
-            .text
-            .lines
-            .iter()
-            .find(|l| line_text(l).contains("quit"))
-            .expect("body line present");
+        let texts: Vec<String> = rendered.text.lines.iter().map(line_text).collect();
+        // Exactly: header row, each body row, one trailing blank line after the
+        // table — no spurious blank line between the header and first row.
+        assert_eq!(texts, vec!["Key  Action  ", "q  quit  ", "j  scroll  ", ""]);
+
+        let header_line = &rendered.text.lines[0];
+        let body_line = &rendered.text.lines[1];
 
         // Header and first body row must be on separate lines, not run together.
         assert!(!line_text(header_line).contains("quit"));
