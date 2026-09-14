@@ -24,7 +24,9 @@ untouched (it's a thematic break, not frontmatter). Every concept doc under `doc
 (e.g. this file) carries frontmatter, so this runs on every concept-doc render — the area
 `index.md` files have none (OKF spec §8), so there's nothing for it to strip there. It runs a
 single pass over `pulldown_cmark::Parser` events and builds a `Vec<Line<'static>>`, returned as
-`Text::from(lines)` (`src/markdown.rs:352`).
+`Text::from(lines)` (`src/markdown.rs:359`). `pulldown_cmark::Parser::new_ext` is called with
+`Options::ENABLE_TABLES` (`src/markdown.rs:148`) — the only non-default parser option — so pipe
+tables (`| a | b |`) parse as real table events instead of plain paragraph text; see Tables below.
 
 ## Style stack
 
@@ -58,7 +60,7 @@ counter, or `"• "`, styled with `scheme.markdown.list_marker`.
 
 ## Fenced code blocks
 
-Inline code (single backtick, `Event::Code`, `src/markdown.rs:306`) is rendered directly as a
+Inline code (single backtick, `Event::Code`, `src/markdown.rs:313`) is rendered directly as a
 span styled with `scheme.markdown.code_inline` — it does not go through syntect.
 
 Fenced/indented code blocks are buffered, not streamed: `Tag::CodeBlock` sets `in_code_block =
@@ -89,7 +91,7 @@ Fence lines (`` ```lang `` / `` ``` ``) are emitted as `Line`s styled with
 Vec<Link>` records every markdown link found, each located by `(line, span_start, span_end)`
 into the returned `Text`'s `Line::spans`, not by screen column: column position depends on
 wrapping/scroll, so it's cheap to recompute on demand instead (see `link_col_range`,
-`src/markdown.rs:360`, used only for mouse hit-testing).
+`src/markdown.rs:367`, used only for mouse hit-testing).
 
 `Tag::Link { dest_url, .. }` pushes `style.patch(scheme.markdown.link)` and `(current.len(),
 dest_url)` onto `link_stack` (`src/markdown.rs:215-217`); `TagEnd::Link` pops it, and if the
@@ -107,20 +109,32 @@ tracked as links — not navigable targets for a file viewer.
 
 ## Tables
 
-Table rendering (`Tag::TableHead | TableRow | TableCell`, `src/markdown.rs:220-231, 287-295`)
-adds a two-space separator per cell and, since `table_header_bold` names a *header* setting, only
-bolds cells inside the header row: an `in_table_head` flag is set on `Tag::TableHead` and cleared
-on `TagEnd::TableHead` (`src/markdown.rs:221, 288`), and `Tag::TableCell` only applies
-`Modifier::BOLD` when both `in_table_head` and `scheme.markdown.table_header_bold` are true
-(`src/markdown.rs:225-231`) — body-row cells (`Tag::TableRow`) never get the header style. It
-still does not align columns or draw borders — cells just run together in reading order with no
-`Tag::Table` grid handling.
+`Tag::TableHead` starts the header row and `Tag::TableRow` each body row
+(`src/markdown.rs:220-231`); `Tag::TableCell` pushes a two-space separator between cells within a
+row (`TagEnd::TableCell`, `src/markdown.rs:296-299`) but, unlike `TableHead`/`TableRow`, does
+*not* flush the line — cells accumulate into the same `current` line until the row itself ends.
+`TagEnd::TableHead` and `TagEnd::TableRow` each call `flush_line` (`src/markdown.rs:287-295`), so
+the header and every body row land on their own `Line`; `TagEnd::Table` adds a trailing blank line
+for spacing (`src/markdown.rs:300-302`), matching other block elements. Without this per-row
+flush, an entire table (header plus every body row) would accumulate into one unbroken `current`
+buffer and wrap as a single unreadable blob — this was caught by rendering this crate's own
+`app-loop.md`/`README.md` key-binding tables after enabling table parsing (see Known gap below)
+and confirmed fixed by inspecting real terminal output.
+
+Since `table_header_bold` names a *header* setting, only header cells are bolded: an
+`in_table_head` flag is set on `Tag::TableHead` and cleared on `TagEnd::TableHead`
+(`src/markdown.rs:221, 288`), and `Tag::TableCell` only applies `Modifier::BOLD` when both
+`in_table_head` and `scheme.markdown.table_header_bold` are true (`src/markdown.rs:225-231`) —
+body-row cells never get the header style. Covered by
+`markdown::tests::table_header_row_is_bold_and_separate_from_body_rows` and
+`table_header_bold_disabled_leaves_header_unbolded`.
 
 ## Known gap
 
-`pulldown_cmark::Parser::new` (`src/markdown.rs:148`) is called with default `Options`, which do
-not enable the `ENABLE_TABLES` extension, so none of the table-tag branches above currently fire
-in practice — table syntax renders as plain paragraph text instead. Fixing this (enabling the
-extension) is out of scope for the color-scheme work; noted here since `table_header_bold` in a
-scheme file has no visible effect, and the header-vs-body bold distinction above is untested
-through `render()`, until it is.
+Tables still don't align columns or draw borders — cells within a row are just
+two-space-separated in reading order, and a row wider than the terminal wraps like any other long
+line, with no re-indent to keep later columns lined up under earlier rows. `Tag::Table`'s column
+alignments (`Tag::Table(alignments)`) are ignored entirely (falls into the catch-all `_ => {}`
+arm). Fixing column alignment would need a two-pass approach (measure all cell widths in a table
+before emitting any row) that the current single-pass event loop doesn't support; out of scope for
+the color-scheme work that enabled table parsing in the first place.

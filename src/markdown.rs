@@ -1,4 +1,4 @@
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use syntect::easy::HighlightLines;
@@ -145,7 +145,7 @@ pub fn render(source: &str, scheme: &Scheme) -> Rendered {
         }
     };
 
-    for event in Parser::new(source) {
+    for event in Parser::new_ext(source, Options::ENABLE_TABLES) {
         let style = *style_stack.last().unwrap();
         match event {
             Event::Start(tag) => match tag {
@@ -287,11 +287,18 @@ pub fn render(source: &str, scheme: &Scheme) -> Rendered {
                 TagEnd::TableHead => {
                     in_table_head = false;
                     style_stack.pop();
-                    push_span(&mut current, "  ".to_string(), style);
+                    flush_line(&mut current, &mut lines, &mut pending_links, &mut links);
                 }
-                TagEnd::TableRow | TagEnd::TableCell => {
+                TagEnd::TableRow => {
+                    style_stack.pop();
+                    flush_line(&mut current, &mut lines, &mut pending_links, &mut links);
+                }
+                TagEnd::TableCell => {
                     style_stack.pop();
                     push_span(&mut current, "  ".to_string(), style);
+                }
+                TagEnd::Table => {
+                    lines.push(Line::from(""));
                 }
                 _ => {}
             },
@@ -640,5 +647,70 @@ mod tests {
             .map(|s| s.style.fg)
             .collect();
         assert_ne!(ocean_colors, solarized_colors);
+    }
+
+    #[test]
+    fn table_header_row_is_bold_and_separate_from_body_rows() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.table_header_bold = true;
+        let src = "| Key | Action |\n|---|---|\n| q | quit |\n| j | scroll |\n";
+        let rendered = render(src, &scheme);
+
+        let line_text =
+            |line: &Line<'_>| -> String { line.spans.iter().map(|s| s.content.as_ref()).collect() };
+        let header_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| line_text(l).contains("Key"))
+            .expect("header line present");
+        let body_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| line_text(l).contains("quit"))
+            .expect("body line present");
+
+        // Header and first body row must be on separate lines, not run together.
+        assert!(!line_text(header_line).contains("quit"));
+        assert!(
+            header_line
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
+        assert!(
+            body_line
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn table_header_bold_disabled_leaves_header_unbolded() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.table_header_bold = false;
+        let src = "| Key | Action |\n|---|---|\n| q | quit |\n";
+        let rendered = render(src, &scheme);
+
+        let header_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("Key")
+            })
+            .expect("header line present");
+        assert!(
+            header_line
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
 }
