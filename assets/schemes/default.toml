@@ -1,0 +1,41 @@
+# Example color scheme matching term-markdown's built-in default rendering.
+#
+# Copy this file to ~/.term-markdown/schemes/<name>.toml and edit it, then
+# set `scheme = "<name>"` in ~/.term-markdown/config.toml to activate it.
+#
+# This file is documentation only — the actual default colors are compiled
+# into the binary (`Scheme::default_builtin` in src/scheme.rs) so the app
+# works with zero configuration. The two must stay in sync; a test in
+# src/scheme.rs (`default_scheme_asset_matches_builtin`) checks that this
+# file still parses and matches.
+name = "default"
+
+[markdown]
+heading_h1        = { fg = "yellow", bold = true }
+heading_h2        = { fg = "cyan", bold = true }
+heading_h3        = { fg = "magenta", bold = true }
+
+blockquote        = { fg = "darkgray", italic = true }
+blockquote_marker = "┃ "
+
+code_fence_marker = { fg = "darkgray" }
+code_block_bg     = "#1e1e1e"
+code_inline       = { fg = "green", bg = "#282828" }
+syntect_theme     = "base16-ocean.dark"
+
+list_marker       = { fg = "white" }
+
+link              = { fg = "blue", underline = true }
+image_alt         = { fg = "magenta" }
+
+table_header_bold = true
+horizontal_rule       = { fg = "darkgray" }
+horizontal_rule_glyph = "─"
+horizontal_rule_width = 60
+
+[ui]
+background = "none"
+border     = "none"
+title      = "none"
+status_bar = { fg = "darkgray" }
+selection  = { reversed = true }
