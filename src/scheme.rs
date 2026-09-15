@@ -259,15 +259,22 @@ impl Scheme {
     /// (non-`"default"`) scheme file that's missing, is a hard error naming
     /// the offending path.
     pub fn load(config_path: Option<&Path>, cli_override: Option<&str>) -> Result<Scheme> {
-        let config = match config_path {
-            Some(path) => read_config(path)?,
-            None => None,
+        // A CLI override fully determines `name`, so `config.toml`'s content
+        // (and thus whether it even parses) is irrelevant — don't let a
+        // broken config file block startup when --scheme was explicitly
+        // given. Only read it when it's actually needed to resolve `name`.
+        let name = match cli_override {
+            Some(name) => name.to_string(),
+            None => {
+                let config = match config_path {
+                    Some(path) => read_config(path)?,
+                    None => None,
+                };
+                config
+                    .and_then(|c| c.scheme)
+                    .unwrap_or_else(|| DEFAULT_SCHEME_NAME.to_string())
+            }
         };
-
-        let name = cli_override
-            .map(str::to_string)
-            .or_else(|| config.and_then(|c| c.scheme))
-            .unwrap_or_else(|| DEFAULT_SCHEME_NAME.to_string());
         validate_scheme_name(&name)?;
 
         let Some(config_path) = config_path else {
@@ -592,6 +599,21 @@ mod tests {
         touch(&t.join("schemes/from-cli.toml"), VALID_SCHEME);
         // Deliberately no "from-config.toml" — if the CLI override didn't
         // win, this would fail to load instead of succeeding.
+
+        let scheme = Scheme::load(Some(&config_path), Some("from-cli")).unwrap();
+        assert_eq!(scheme.markdown.heading_h1.fg, Some(Color::Red));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn cli_override_works_even_with_malformed_config_toml() {
+        // --scheme fully determines the scheme name, so config.toml's
+        // content — including whether it even parses — must not matter.
+        let t = temp_tree("cli-override-bad-config");
+        let config_path = t.join("config.toml");
+        touch(&config_path, "this is not valid toml {{{");
+        touch(&t.join("schemes/from-cli.toml"), VALID_SCHEME);
 
         let scheme = Scheme::load(Some(&config_path), Some("from-cli")).unwrap();
         assert_eq!(scheme.markdown.heading_h1.fg, Some(Color::Red));
