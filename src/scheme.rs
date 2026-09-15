@@ -182,12 +182,28 @@ pub struct Scheme {
     pub syntax_theme: Theme,
 }
 
+/// The syntect theme for [`Scheme::default_builtin`]. Looks up the
+/// well-known bundled name first; if a future syntect release ever
+/// renames or drops it, falls back to whatever bundled theme happens to
+/// come first rather than panicking on every zero-config startup — any
+/// theme beats crashing the app over code-block coloring. The final
+/// `expect` only fires if syntect ships zero bundled themes at all, which
+/// would mean syntect itself is broken, not this crate.
+fn default_syntect_theme() -> Theme {
+    let themes = ThemeSet::load_defaults().themes;
+    themes
+        .get("base16-ocean.dark")
+        .or_else(|| themes.values().next())
+        .expect("syntect ships at least one bundled theme")
+        .clone()
+}
+
 impl Scheme {
     /// The scheme used when no config/scheme file resolves. Must reproduce
     /// term-markdown's original hardcoded colors exactly; kept in sync by
     /// hand with `assets/schemes/default.toml` (checked by a test below).
     pub fn default_builtin() -> Scheme {
-        let syntax_theme = ThemeSet::load_defaults().themes["base16-ocean.dark"].clone();
+        let syntax_theme = default_syntect_theme();
         Scheme {
             markdown: MarkdownStyles {
                 heading_h1: Style::default()

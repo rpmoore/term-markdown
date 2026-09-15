@@ -628,8 +628,11 @@ mod tests {
     fn syntect_theme_affects_code_block_colors() {
         let ocean = Scheme::default_builtin();
         let mut solarized = Scheme::default_builtin();
-        solarized.syntax_theme =
-            syntect::highlighting::ThemeSet::load_defaults().themes["Solarized (dark)"].clone();
+        solarized.syntax_theme = syntect::highlighting::ThemeSet::load_defaults()
+            .themes
+            .get("Solarized (dark)")
+            .expect("bundled \"Solarized (dark)\" theme available")
+            .clone();
 
         let src = "```rust\nfn main() {}\n```";
         let ocean_colors: Vec<_> = render(src, &ocean)
