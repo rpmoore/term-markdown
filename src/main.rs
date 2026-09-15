@@ -31,6 +31,11 @@ use scheme::Scheme;
 /// enough to map screen rows back to logical lines (ratatui's own wrapper
 /// lives in a private module, so this is a reimplementation, not a call-out
 /// to it). A width of 0, or empty text, always occupies exactly one row.
+/// Saturates at `u16::MAX` for a pathologically long line rather than
+/// wrapping around to a small (or zero) value — `ratatui::Paragraph::scroll`
+/// itself takes a `u16` offset, so a document can never usefully scroll past
+/// that many rows anyway; silently truncating the count would corrupt the
+/// row accounting for every line after it instead of just capping this one.
 fn wrapped_row_count(text: &str, width: u16) -> u16 {
     if width == 0 || text.is_empty() {
         return 1;
@@ -57,7 +62,7 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
             col += w;
         }
     }
-    rows as u16
+    rows.min(u16::MAX as usize) as u16
 }
 
 /// Terminal markdown viewer.
@@ -268,8 +273,11 @@ impl App {
         let row = self.row_starts(width)[line];
         if row < self.scroll {
             self.scroll = row;
-        } else if viewport_height > 0 && row >= self.scroll + viewport_height {
-            self.scroll = row + 1 - viewport_height;
+        } else if viewport_height > 0 && row >= self.scroll.saturating_add(viewport_height) {
+            // Saturating, not `row + 1 - viewport_height`: `row` can be
+            // `u16::MAX` for a document with enough wrapped rows (see
+            // `wrapped_row_count`), and the plain `+ 1` there would overflow.
+            self.scroll = row.saturating_add(1).saturating_sub(viewport_height);
         }
         let max = self.max_scroll(viewport_height, width);
         self.scroll = self.scroll.min(max);
@@ -862,6 +870,37 @@ mod tests {
     fn single_overlong_word_force_wraps() {
         let text = "x".repeat(45);
         assert_eq!(wrapped_row_count(&text, 20), 3); // 20 + 20 + 5
+    }
+
+    #[test]
+    fn row_count_saturates_instead_of_wrapping_around() {
+        // At width 1, a 70,000-char unbroken line needs ~70,000 rows —
+        // past u16::MAX. Regression test: `rows as u16` used to truncate
+        // this to a small (here: near-zero) value instead of capping it,
+        // corrupting every line's row accounting after it.
+        let text = "x".repeat(70_000);
+        assert_eq!(wrapped_row_count(&text, 1), u16::MAX);
+    }
+
+    #[test]
+    fn selecting_link_at_u16_max_row_does_not_panic() {
+        // Regression test for overflow in `ensure_line_visible`: a link on
+        // a logical line whose row offset is exactly `u16::MAX` used to
+        // panic (debug) or silently corrupt scroll state (release) via
+        // `row + 1 - viewport_height`.
+        let dir = temp_tree("rowlimit");
+        let file = dir.join("doc.md");
+        // 65,535 hard-broken one-char lines (two trailing spaces force a
+        // hard break) place the link's own line at row offset u16::MAX.
+        let mut source = "x  \n".repeat(65_535);
+        source.push_str("[end](target.md)\n");
+        std::fs::write(&file, &source).unwrap();
+        touch(&dir.join("target.md"));
+
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        app.select_next_link(true, 20, 80);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -38,7 +38,7 @@ override is `--root <dir>`. Detection runs once in `main` and the result is stor
 3. `detect_root_bounded(start, stop)` (`src/bundle.rs:49-65`) walks `start.ancestors()`, breaking at
    `stop`, and returns:
    1. the **nearest** directory whose `index.md` declares a *top-level* `okf_version` key in its
-      frontmatter (`declares_okf_version`, `src/bundle.rs:82-100`) — the spec permits frontmatter
+      frontmatter (`declares_okf_version`, `src/bundle.rs:114-153`) — the spec permits frontmatter
       only in the bundle-root `index.md`, so this is definitive and the walk stops immediately;
    2. otherwise the **outermost** directory (before `stop`) containing an `index.md` *file* — gaps
       are fine, a `plans/` without an `index.md` between two directories that have one doesn't end
@@ -48,10 +48,30 @@ override is `--root <dir>`. Detection runs once in `main` and the result is stor
 
 `declares_okf_version` is deliberately local rather than reusing `markdown::strip_frontmatter`: the
 first line must be `---` (CRLF-tolerant — looser than `strip_frontmatter`, which affects only
-detection), it scans to the closing `---` (the file is already in memory, so a long `tags:` list
-can't hide the key), an unclosed fence counts as "no frontmatter" (matching `strip_frontmatter`),
-a key that only appears in the body after the closing fence doesn't count, and neither does an
-indented `okf_version:` nested under another key or inside a block scalar (column 0 only).
+detection), an unclosed fence counts as "no frontmatter" (matching `strip_frontmatter`), a key that
+only appears in the body after the closing fence doesn't count, and neither does an indented
+`okf_version:` nested under another key or inside a block scalar (column 0 only). It reads via a
+`BufReader` over a `Read::take`-limited file handle rather than `fs::read_to_string`, and bails once
+either the closing fence is found or `MAX_FRONTMATTER_SCAN_BYTES` (64 KiB, `src/bundle.rs:86`) bytes
+have been consumed without one — this walk runs on every file open with no user interaction gating
+it, so an `index.md` that is huge, or has a fence that never closes, or is a single pathological
+line with no newline for megabytes, must not force a full (or even partial-but-unbounded) read into
+memory. The limit is enforced via `Read::take` on the underlying file rather than counting bytes
+returned by each `read_line` call after the fact: `read_line` itself has no length cap, so a single
+huge unterminated line would otherwise be read into memory in one call regardless of a manual
+post-hoc byte count. A side effect of reading line-by-line instead of the whole file up front: only
+the frontmatter block itself needs to be valid UTF-8 now — invalid bytes later in the document body
+(past the closing fence, or past the byte cap) are never read and so no longer affect the result,
+unlike the old whole-file `fs::read_to_string`.
+
+A line with no trailing newline only counts as a genuine closing `---` if it also reached real
+end-of-file, not just the byte cap — `Take` cutting a line short mid-read looks identical to a
+short final line at true EOF, so without this check a line that merely *starts* with `---` and
+keeps going unclosed could be mistaken for a real closing fence if the cap happened to land exactly
+three bytes in. This trades away one vanishingly unlikely case — a file whose real, valid closing
+fence sits with no trailing newline at a byte offset exactly equal to the cap — in favor of never
+producing a false match; the traded-away case still falls through to "no frontmatter", which is the
+safe direction to be wrong in (fixable with `--root`).
 
 ## Worked examples
 
