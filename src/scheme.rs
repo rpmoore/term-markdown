@@ -276,15 +276,37 @@ impl Scheme {
 /// the path is a directory, this treats anything other than "doesn't exist"
 /// as a hard error — an existing-but-broken `schemes/default.toml` must not
 /// be silently ignored in favor of the built-in default.
+///
+/// A broken symlink needs two checks, not one: `symlink_metadata` (doesn't
+/// follow links) determines whether *something* is there at all — a dangling
+/// symlink still counts as "something", unlike a genuinely absent path — and
+/// only once that's established does `metadata` (which *does* follow links)
+/// get used to resolve it to an actual file, so a symlink pointing nowhere
+/// surfaces as a hard error instead of being folded into "doesn't exist"
+/// (which is exactly what plain `metadata` alone would do, since stat-ing
+/// through a dangling symlink also yields `NotFound`).
 fn default_scheme_file_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to check scheme file {}", path.display()));
+        }
+    }
+
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() => Ok(true),
         Ok(_) => bail!(
             "expected a file at {} but found something else (e.g. a directory)",
             path.display()
         ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("failed to check scheme file {}", path.display())),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "failed to resolve scheme file {} (broken symlink?)",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -504,6 +526,27 @@ mod tests {
         let t = temp_tree("default-scheme-is-dir");
         let config_path = t.join("config.toml");
         std::fs::create_dir_all(t.join("schemes/default.toml")).unwrap();
+
+        let err = Scheme::load(Some(&config_path), None).unwrap_err();
+        assert!(err.to_string().contains("default.toml"));
+
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_scheme_path_that_is_a_broken_symlink_is_a_hard_error() {
+        // A dangling symlink at schemes/default.toml "exists" (as a link)
+        // but resolves to nothing — must not be folded into the same
+        // "doesn't exist" fallback as a genuinely absent path.
+        let t = temp_tree("default-scheme-broken-symlink");
+        let config_path = t.join("config.toml");
+        std::fs::create_dir_all(t.join("schemes")).unwrap();
+        std::os::unix::fs::symlink(
+            t.join("schemes/nonexistent-target.toml"),
+            t.join("schemes/default.toml"),
+        )
+        .unwrap();
 
         let err = Scheme::load(Some(&config_path), None).unwrap_err();
         assert!(err.to_string().contains("default.toml"));
