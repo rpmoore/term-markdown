@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
@@ -207,6 +207,12 @@ struct App {
     selected_link: Option<usize>,
     history: Vec<(PathBuf, u16)>,
     status: Option<String>,
+    /// Memoized `row_starts` result, keyed by the wrap width it was computed
+    /// at. `row_starts` is recomputed from `body` on a cache miss (width
+    /// change or a fresh `load`) rather than on every call — see
+    /// `row_starts` for why an unconditional per-call rebuild is expensive.
+    row_starts_cache: Vec<u32>,
+    row_starts_cache_width: Option<u16>,
 }
 
 impl App {
@@ -221,6 +227,8 @@ impl App {
             selected_link: None,
             history: Vec::new(),
             status: None,
+            row_starts_cache: Vec::new(),
+            row_starts_cache_width: None,
         };
         app.load(path)?;
         Ok(app)
@@ -235,6 +243,7 @@ impl App {
         self.links = rendered.links;
         self.scroll = 0;
         self.selected_link = None;
+        self.row_starts_cache_width = None;
         Ok(())
     }
 
@@ -249,22 +258,26 @@ impl App {
     /// `ensure_line_visible`), not the totals feeding into it, so a document
     /// landing exactly on the `u16` boundary doesn't lose a row to premature
     /// rounding before it even gets there.
-    fn row_starts(&self, width: u16) -> Vec<u32> {
-        let mut starts = Vec::with_capacity(self.body.lines.len() + 1);
-        let mut acc: u32 = 0;
-        for line in &self.body.lines {
+    fn row_starts(&mut self, width: u16) -> &[u32] {
+        if self.row_starts_cache_width != Some(width) {
+            let mut starts = Vec::with_capacity(self.body.lines.len() + 1);
+            let mut acc: u32 = 0;
+            for line in &self.body.lines {
+                starts.push(acc);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                acc = acc.saturating_add(wrapped_row_count(&text, width));
+            }
             starts.push(acc);
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            acc = acc.saturating_add(wrapped_row_count(&text, width));
+            self.row_starts_cache = starts;
+            self.row_starts_cache_width = Some(width);
         }
-        starts.push(acc);
-        starts
+        &self.row_starts_cache
     }
 
     /// The logical line and within-line display row that screen `row`
     /// (0-based, counted from the top of scrolled content) falls on, or
     /// `None` if `row` is past the end of the document.
-    fn line_at_row(&self, row: u32, width: u16) -> Option<(usize, u32)> {
+    fn line_at_row(&mut self, row: u32, width: u16) -> Option<(usize, u32)> {
         let starts = self.row_starts(width);
         let total = *starts.last().unwrap();
         if row >= total {
@@ -276,7 +289,7 @@ impl App {
         Some((line, row - starts[line]))
     }
 
-    fn max_scroll(&self, viewport_height: u16, width: u16) -> u32 {
+    fn max_scroll(&mut self, viewport_height: u16, width: u16) -> u32 {
         let total = *self.row_starts(width).last().unwrap();
         total.saturating_sub(viewport_height as u32)
     }
@@ -288,7 +301,7 @@ impl App {
     /// simply not reachable — but that's a distinct, larger-scale problem
     /// from losing a row right at the boundary through internal rounding,
     /// which is what keeping `row_starts`/`max_scroll` in `u32` avoids.
-    fn max_scroll_u16(&self, viewport_height: u16, width: u16) -> u16 {
+    fn max_scroll_u16(&mut self, viewport_height: u16, width: u16) -> u16 {
         self.max_scroll(viewport_height, width).min(u16::MAX as u32) as u16
     }
 
@@ -380,6 +393,42 @@ impl App {
         }
     }
 
+    /// The paragraph text for the current frame: `body` with the selected
+    /// link's style patched in, if any. Each span borrows its text straight
+    /// from `body` (`Span::styled` over `&str` produces `Cow::Borrowed`)
+    /// instead of cloning the owned `String` every span holds, so this
+    /// costs a `Vec` allocation per line/span rather than a byte-for-byte
+    /// copy of the whole rendered document — `ratatui::Paragraph::new`
+    /// still requires an owned `Text`, so some per-frame allocation is
+    /// unavoidable, but not one that scales with document *content* size.
+    fn display_text(&self) -> Text<'_> {
+        let selected = self.selected_link.map(|idx| &self.links[idx]);
+        self.body
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let spans: Vec<Span<'_>> = line
+                    .spans
+                    .iter()
+                    .enumerate()
+                    .map(|(j, span)| {
+                        let highlighted = selected.is_some_and(|link| {
+                            link.line == i && j >= link.span_start && j < link.span_end
+                        });
+                        let style = if highlighted {
+                            span.style.patch(self.scheme.ui.selection)
+                        } else {
+                            span.style
+                        };
+                        Span::styled(span.content.as_ref(), style)
+                    })
+                    .collect();
+                Line::from(spans)
+            })
+            .collect()
+    }
+
     /// Link (if any) whose rendered column range on `line` contains `col`.
     fn link_at(&self, line: usize, col: u16) -> Option<usize> {
         self.links.iter().position(|link| {
@@ -460,15 +509,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                 frame.render_widget(Block::default().style(bg), frame.area());
             }
 
-            let mut text = app.body.clone();
-            if let Some(idx) = app.selected_link {
-                let link = &app.links[idx];
-                if let Some(line) = text.lines.get_mut(link.line) {
-                    for span in &mut line.spans[link.span_start..link.span_end] {
-                        span.style = span.style.patch(app.scheme.ui.selection);
-                    }
-                }
-            }
+            let text = app.display_text();
 
             let mut block = Block::default()
                 .borders(Borders::ALL)
@@ -955,8 +996,8 @@ mod tests {
         let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         app.select_next_link(true, 20, 80);
 
-        let link = &app.links[app.selected_link.unwrap()];
-        let row = app.row_starts(80)[link.line];
+        let link_line = app.links[app.selected_link.unwrap()].line;
+        let row = app.row_starts(80)[link_line];
         assert!(
             row >= app.scroll as u32 && row < app.scroll as u32 + 20,
             "link row {row} not visible in viewport [{}, {})",
@@ -977,7 +1018,7 @@ mod tests {
         // line 1: single short row
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let starts = app.row_starts(10);
         // first logical line should take >1 row at this width
         assert!(starts[1] - starts[0] > 1);
@@ -993,7 +1034,7 @@ mod tests {
         // "rendering" link landed several rows off because the frontmatter
         // rendered as one giant wrapped heading.
         let knowledge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/knowledge"));
-        let app = App::new(
+        let mut app = App::new(
             knowledge.join("index.md"),
             knowledge,
             Scheme::default_builtin(),
@@ -1009,8 +1050,9 @@ mod tests {
 
         let link = &app.links[rendering_link];
         let (start, end) = markdown::link_col_range(&app.body.lines[link.line], link);
+        let link_line = link.line;
         let click_col = start + (end - start) / 2;
-        let click_row = app.row_starts(width)[link.line]; // first row of that line
+        let click_row = app.row_starts(width)[link_line]; // first row of that line
 
         let (line, sub_row) = app.line_at_row(click_row, width).unwrap();
         assert_eq!(sub_row, 0, "link's own line should not be pre-wrapped");
@@ -1025,11 +1067,80 @@ mod tests {
         let file = dir.join("doc.md");
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let (line, sub_row) = app.line_at_row(0, 10).unwrap();
         assert_eq!((line, sub_row), (0, 0));
         let (line, sub_row) = app.line_at_row(1, 10).unwrap();
         assert_eq!((line, sub_row), (0, 1)); // second wrapped row of line 0
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn row_starts_cache_recomputes_on_width_change() {
+        let dir = temp_tree("rowcache-width");
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "0123456789 abcde\n").unwrap();
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+
+        let narrow_total = *app.row_starts(10).last().unwrap();
+        let wide_total = *app.row_starts(80).last().unwrap();
+        assert!(
+            narrow_total > wide_total,
+            "narrower width should wrap to more rows"
+        );
+        // Re-querying the original width must reflect that width again, not
+        // a value left over from the intervening wide-width cache miss.
+        assert_eq!(*app.row_starts(10).last().unwrap(), narrow_total);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn row_starts_cache_invalidated_after_reload() {
+        let dir = temp_tree("rowcache-reload");
+        let file_a = dir.join("a.md");
+        let file_b = dir.join("b.md");
+        std::fs::write(&file_a, "short\n").unwrap();
+        std::fs::write(&file_b, "0123456789 abcde\n").unwrap();
+        let mut app = App::new(file_a, dir.clone(), Scheme::default_builtin()).unwrap();
+
+        let short_total = *app.row_starts(10).last().unwrap();
+        app.load(file_b).unwrap();
+        let after_reload = *app.row_starts(10).last().unwrap();
+        assert_ne!(
+            after_reload, short_total,
+            "row_starts must reflect the newly loaded document, not a cached previous one"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn display_text_patches_selected_link_style_without_mutating_body() {
+        use ratatui::style::Modifier;
+
+        let dir = temp_tree("displaytext");
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "[a link](target.md)\n").unwrap();
+        touch(&dir.join("target.md"));
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        app.select_next_link(true, 20, 80);
+
+        let link = app.links[app.selected_link.unwrap()].clone();
+        let text = app.display_text();
+        let selected_span = &text.lines[link.line].spans[link.span_start];
+        assert!(
+            selected_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+
+        // The underlying body must stay untouched: `display_text` builds a
+        // fresh view rather than cloning-then-mutating stored state.
+        let stored_span = &app.body.lines[link.line].spans[link.span_start];
+        assert!(!stored_span.style.add_modifier.contains(Modifier::REVERSED));
 
         std::fs::remove_dir_all(&dir).ok();
     }
