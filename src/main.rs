@@ -1,5 +1,6 @@
 mod bundle;
 mod markdown;
+mod scheme;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -18,19 +19,28 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use markdown::Link;
+use scheme::Scheme;
 
 /// How many terminal rows `text` occupies once word-wrapped at `width`
 /// columns, matching ratatui's `Wrap { trim: false }` behavior closely
 /// enough to map screen rows back to logical lines (ratatui's own wrapper
 /// lives in a private module, so this is a reimplementation, not a call-out
 /// to it). A width of 0, or empty text, always occupies exactly one row.
-fn wrapped_row_count(text: &str, width: u16) -> u16 {
+/// Returns `u32`, not `u16`: `ratatui::Paragraph::scroll` itself takes a
+/// `u16` offset, but row *counts* and *cumulative totals* (see
+/// `App::row_starts`) need headroom above that to avoid losing precision
+/// right at the boundary — clamping every individual count to `u16::MAX`
+/// before summing would make a document with, say, exactly 65,536 total
+/// rows indistinguishable from one with 65,535, undercounting the true
+/// total by one and leaving its last row permanently one row outside any
+/// viewport. Only the final scroll offset actually handed to ratatui needs
+/// clamping to `u16`, not the counts feeding into it.
+fn wrapped_row_count(text: &str, width: u16) -> u32 {
     if width == 0 || text.is_empty() {
         return 1;
     }
@@ -56,7 +66,16 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
             col += w;
         }
     }
-    rows as u16
+    rows.min(u32::MAX as usize) as u32
+}
+
+/// The absolute document row a mouse click's screen row (`mouse_row`, known
+/// to be inside the body area, so `mouse_row > body_area_y`) maps to, given
+/// the current scroll offset. Widened to `u32` before adding: `scroll` can
+/// be near `u16::MAX` on a large enough document (see `wrapped_row_count`),
+/// and computing this sum in `u16` could overflow.
+fn absolute_click_row(scroll: u16, mouse_row: u16, body_area_y: u16) -> u32 {
+    scroll as u32 + (mouse_row - body_area_y - 1) as u32
 }
 
 /// Terminal markdown viewer.
@@ -69,6 +88,10 @@ struct Args {
     /// Bundle root for absolute (`/x/y.md`) links; auto-detected when omitted
     #[arg(long, value_name = "DIR")]
     root: Option<PathBuf>,
+
+    /// Color scheme to use, overriding ~/.term-markdown/config.toml
+    #[arg(long, value_name = "NAME")]
+    scheme: Option<String>,
 }
 
 /// Where a link points: relative paths resolve against the file it appeared
@@ -176,6 +199,8 @@ struct App {
     path: PathBuf,
     /// Base for absolute links; fixed at startup, never changed by `load`.
     bundle_root: PathBuf,
+    /// Active color scheme; fixed at startup, never changed by `load`.
+    scheme: Scheme,
     body: Text<'static>,
     links: Vec<Link>,
     scroll: u16,
@@ -185,10 +210,11 @@ struct App {
 }
 
 impl App {
-    fn new(path: PathBuf, bundle_root: PathBuf) -> Result<Self> {
+    fn new(path: PathBuf, bundle_root: PathBuf, scheme: Scheme) -> Result<Self> {
         let mut app = App {
             path: PathBuf::new(),
             bundle_root,
+            scheme,
             body: Text::default(),
             links: Vec::new(),
             scroll: 0,
@@ -203,7 +229,7 @@ impl App {
     fn load(&mut self, path: PathBuf) -> Result<()> {
         let source = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let rendered = markdown::render(&source);
+        let rendered = markdown::render(&source, &self.scheme);
         self.path = path;
         self.body = rendered.text;
         self.links = rendered.links;
@@ -217,10 +243,15 @@ impl App {
     /// `Paragraph::scroll` offset counts wrapped display rows, not logical
     /// lines (see `render_text` in ratatui's paragraph widget), so anything
     /// mapping a screen row back to a logical line — or clamping scroll —
-    /// needs this rather than `self.body.lines.len()`.
-    fn row_starts(&self, width: u16) -> Vec<u16> {
+    /// needs this rather than `self.body.lines.len()`. Kept as `u32`, wider
+    /// than the `u16` `Paragraph::scroll` itself takes: only the scroll
+    /// offset ultimately handed to ratatui needs clamping to `u16` (see
+    /// `ensure_line_visible`), not the totals feeding into it, so a document
+    /// landing exactly on the `u16` boundary doesn't lose a row to premature
+    /// rounding before it even gets there.
+    fn row_starts(&self, width: u16) -> Vec<u32> {
         let mut starts = Vec::with_capacity(self.body.lines.len() + 1);
-        let mut acc: u16 = 0;
+        let mut acc: u32 = 0;
         for line in &self.body.lines {
             starts.push(acc);
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -233,7 +264,7 @@ impl App {
     /// The logical line and within-line display row that screen `row`
     /// (0-based, counted from the top of scrolled content) falls on, or
     /// `None` if `row` is past the end of the document.
-    fn line_at_row(&self, row: u16, width: u16) -> Option<(usize, u16)> {
+    fn line_at_row(&self, row: u32, width: u16) -> Option<(usize, u32)> {
         let starts = self.row_starts(width);
         let total = *starts.last().unwrap();
         if row >= total {
@@ -245,25 +276,43 @@ impl App {
         Some((line, row - starts[line]))
     }
 
-    fn max_scroll(&self, viewport_height: u16, width: u16) -> u16 {
+    fn max_scroll(&self, viewport_height: u16, width: u16) -> u32 {
         let total = *self.row_starts(width).last().unwrap();
-        total.saturating_sub(viewport_height)
+        total.saturating_sub(viewport_height as u32)
+    }
+
+    /// `max_scroll` clamped to what `self.scroll` (a `u16`, matching
+    /// `ratatui::Paragraph::scroll`'s own offset type) can actually hold. A
+    /// document whose total row count genuinely exceeds what a `u16` scroll
+    /// offset can reach is an unavoidable ratatui limitation — its tail is
+    /// simply not reachable — but that's a distinct, larger-scale problem
+    /// from losing a row right at the boundary through internal rounding,
+    /// which is what keeping `row_starts`/`max_scroll` in `u32` avoids.
+    fn max_scroll_u16(&self, viewport_height: u16, width: u16) -> u16 {
+        self.max_scroll(viewport_height, width).min(u16::MAX as u32) as u16
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u16, width: u16) {
-        let max = self.max_scroll(viewport_height, width);
+        let max = self.max_scroll_u16(viewport_height, width);
         let new = (self.scroll as i32 + delta).clamp(0, max as i32);
         self.scroll = new as u16;
     }
 
     fn ensure_line_visible(&mut self, line: usize, viewport_height: u16, width: u16) {
         let row = self.row_starts(width)[line];
-        if row < self.scroll {
-            self.scroll = row;
-        } else if viewport_height > 0 && row >= self.scroll + viewport_height {
-            self.scroll = row + 1 - viewport_height;
+        if row < self.scroll as u32 {
+            self.scroll = row as u16; // row < self.scroll <= u16::MAX, so this fits.
+        } else if viewport_height > 0 && row >= self.scroll as u32 + viewport_height as u32 {
+            // Computed in `u32`, not `row + 1 - viewport_height` in `u16`:
+            // `row` can be `u16::MAX` for a document with enough wrapped
+            // rows, and `row + 1` there would either overflow (unchecked)
+            // or saturate back down to `u16::MAX` (saturating) — either way
+            // undercounting by exactly one and leaving `line` one row
+            // outside the viewport even though it should just barely fit.
+            let target = (row + 1).saturating_sub(viewport_height as u32);
+            self.scroll = target.min(u16::MAX as u32) as u16;
         }
-        let max = self.max_scroll(viewport_height, width);
+        let max = self.max_scroll_u16(viewport_height, width);
         self.scroll = self.scroll.min(max);
     }
 
@@ -348,7 +397,12 @@ fn main() -> Result<()> {
         Some(root) => explicit_root(root)?,
         None => bundle::detect_root(&args.file).context("failed to detect bundle root")?,
     };
-    let mut app = App::new(args.file, bundle_root)?;
+    let scheme = Scheme::load(
+        scheme::default_config_path().as_deref(),
+        args.scheme.as_deref(),
+    )
+    .context("failed to load color scheme")?;
+    let mut app = App::new(args.file, bundle_root, scheme)?;
 
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, &mut app);
@@ -400,21 +454,31 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
             body_height = chunks[0].height.saturating_sub(2);
             content_width = chunks[0].width.saturating_sub(2);
 
-            app.scroll = app.scroll.min(app.max_scroll(body_height, content_width));
+            app.scroll = app.scroll.min(app.max_scroll_u16(body_height, content_width));
+
+            if let Some(bg) = app.scheme.ui.background {
+                frame.render_widget(Block::default().style(bg), frame.area());
+            }
 
             let mut text = app.body.clone();
             if let Some(idx) = app.selected_link {
                 let link = &app.links[idx];
                 if let Some(line) = text.lines.get_mut(link.line) {
                     for span in &mut line.spans[link.span_start..link.span_end] {
-                        span.style = span.style.add_modifier(Modifier::REVERSED);
+                        span.style = span.style.patch(app.scheme.ui.selection);
                     }
                 }
             }
 
-            let block = Block::default()
+            let mut block = Block::default()
                 .borders(Borders::ALL)
                 .title(app.path.display().to_string());
+            if let Some(border_style) = app.scheme.ui.border {
+                block = block.border_style(border_style);
+            }
+            if let Some(title_style) = app.scheme.ui.title {
+                block = block.title_style(title_style);
+            }
             let paragraph = Paragraph::new(text)
                 .block(block)
                 .wrap(Wrap { trim: false })
@@ -428,7 +492,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                 None => format!(" line {}/{}  |  {}", app.scroll, max, hint),
             };
             frame.render_widget(
-                Paragraph::new(Line::from(status_text)).style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new(Line::from(status_text)).style(app.scheme.ui.status_bar),
                 chunks[1],
             );
         })?;
@@ -476,7 +540,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                             && mouse.column > body_area.x
                             && mouse.column + 1 < body_area.x + body_area.width;
                         if inside {
-                            let row = app.scroll + (mouse.row - body_area.y - 1);
+                            let row = absolute_click_row(app.scroll, mouse.row, body_area.y);
                             let col = mouse.column - body_area.x - 1;
                             match app.line_at_row(row, content_width) {
                                 Some((line, 0)) => match app.link_at(line, col) {
@@ -830,6 +894,19 @@ mod tests {
     }
 
     #[test]
+    fn absolute_click_row_does_not_overflow_near_scroll_ceiling() {
+        // Regression test (found by a Copilot PR review): computing
+        // `scroll + (mouse_row - body_area_y - 1)` in u16 could overflow
+        // when scroll is near u16::MAX on a large enough document and a
+        // click lands near the bottom of the viewport.
+        let scroll = u16::MAX - 5;
+        assert_eq!(
+            absolute_click_row(scroll, 25, 5),
+            scroll as u32 + 19 // mouse_row - body_area_y - 1 = 25 - 5 - 1
+        );
+    }
+
+    #[test]
     fn long_text_wraps_across_multiple_rows() {
         let text = "a ".repeat(50); // 100 cols wide
         assert_eq!(wrapped_row_count(&text, 20), 5);
@@ -842,6 +919,55 @@ mod tests {
     }
 
     #[test]
+    fn row_count_does_not_truncate_past_old_u16_limit() {
+        // At width 1, a 70,000-char unbroken line needs exactly 70,000
+        // rows — past the old u16::MAX ceiling. Regression test: `rows as
+        // u16` used to truncate this to a small (here: near-zero) value
+        // instead of preserving it, corrupting every line's row accounting
+        // after it. `wrapped_row_count` now returns `u32`, wide enough that
+        // no truncation happens at all for a count like this.
+        let text = "x".repeat(70_000);
+        assert_eq!(wrapped_row_count(&text, 1), 70_000);
+    }
+
+    #[test]
+    fn selecting_link_at_u16_max_row_is_visible_and_does_not_panic() {
+        // Regression test for overflow in `ensure_line_visible`: a link on
+        // a logical line whose row offset is exactly `u16::MAX` used to
+        // panic (debug) or silently corrupt scroll state (release) via
+        // `row + 1 - viewport_height`. It's since been widened to `u32`
+        // internally, which also fixes a subtler bug a Codex PR review
+        // caught in the first (panic-only) fix: clamping the row count to
+        // `u16::MAX` *before* summing made a document with exactly 65,536
+        // total rows indistinguishable from one with 65,535, so the last
+        // row's link ended up one row outside the viewport even after the
+        // scroll math stopped panicking. This asserts the link is actually
+        // visible, not just that selecting it doesn't crash.
+        let dir = temp_tree("rowlimit");
+        let file = dir.join("doc.md");
+        // 65,535 hard-broken one-char lines (two trailing spaces force a
+        // hard break) place the link's own line at row offset u16::MAX.
+        let mut source = "x  \n".repeat(65_535);
+        source.push_str("[end](target.md)\n");
+        std::fs::write(&file, &source).unwrap();
+        touch(&dir.join("target.md"));
+
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        app.select_next_link(true, 20, 80);
+
+        let link = &app.links[app.selected_link.unwrap()];
+        let row = app.row_starts(80)[link.line];
+        assert!(
+            row >= app.scroll as u32 && row < app.scroll as u32 + 20,
+            "link row {row} not visible in viewport [{}, {})",
+            app.scroll,
+            app.scroll as u32 + 20
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn row_starts_accounts_for_wrapped_lines() {
         let dir =
             std::env::temp_dir().join(format!("term-markdown-rowtest-{}", std::process::id()));
@@ -851,7 +977,7 @@ mod tests {
         // line 1: single short row
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone()).unwrap();
+        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let starts = app.row_starts(10);
         // first logical line should take >1 row at this width
         assert!(starts[1] - starts[0] > 1);
@@ -867,7 +993,12 @@ mod tests {
         // "rendering" link landed several rows off because the frontmatter
         // rendered as one giant wrapped heading.
         let knowledge = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/knowledge"));
-        let app = App::new(knowledge.join("index.md"), knowledge).unwrap();
+        let app = App::new(
+            knowledge.join("index.md"),
+            knowledge,
+            Scheme::default_builtin(),
+        )
+        .unwrap();
         let width = 78u16;
 
         let rendering_link = app
@@ -894,7 +1025,7 @@ mod tests {
         let file = dir.join("doc.md");
         std::fs::write(&file, "0123456789 abcde\n\nshort\n").unwrap();
 
-        let app = App::new(file, dir.clone()).unwrap();
+        let app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
         let (line, sub_row) = app.line_at_row(0, 10).unwrap();
         assert_eq!((line, sub_row), (0, 0));
         let (line, sub_row) = app.line_at_row(1, 10).unwrap();

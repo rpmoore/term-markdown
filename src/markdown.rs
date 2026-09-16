@@ -1,11 +1,13 @@
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme, ThemeSet};
+use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use unicode_width::UnicodeWidthStr;
+
+use crate::scheme::Scheme;
 
 fn syn_color_to_ratatui(c: SynColor) -> Color {
     Color::Rgb(c.r, c.g, c.b)
@@ -34,6 +36,7 @@ fn highlight_code_block(
     lang: &str,
     syntax_set: &SyntaxSet,
     theme: &Theme,
+    bg: Style,
     lines: &mut Vec<Line<'static>>,
 ) {
     let syntax: &SyntaxReference = syntax_set
@@ -41,7 +44,6 @@ fn highlight_code_block(
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
 
     let mut highlighter = HighlightLines::new(syntax, theme);
-    let bg = Style::default().bg(Color::Rgb(30, 30, 30));
 
     for src_line in LinesWithEndings::from(code) {
         let ranges = highlighter
@@ -117,11 +119,10 @@ fn strip_frontmatter(source: &str) -> &str {
 
 /// Convert a markdown source string into a styled ratatui `Text` (plus the
 /// links found in it) ready for display in a scrollable widget.
-pub fn render(source: &str) -> Rendered {
+pub fn render(source: &str, scheme: &Scheme) -> Rendered {
     let source = strip_frontmatter(source);
     let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
-    let theme = &theme_set.themes["base16-ocean.dark"];
+    let theme = &scheme.syntax_theme;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
@@ -130,6 +131,7 @@ pub fn render(source: &str) -> Rendered {
     let mut list_stack: Vec<Option<u64>> = Vec::new();
 
     let mut in_code_block = false;
+    let mut in_table_head = false;
     let mut code_lang = String::new();
     let mut code_buffer = String::new();
 
@@ -143,17 +145,17 @@ pub fn render(source: &str) -> Rendered {
         }
     };
 
-    for event in Parser::new(source) {
+    for event in Parser::new_ext(source, Options::ENABLE_TABLES) {
         let style = *style_stack.last().unwrap();
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
-                    let color = match level {
-                        HeadingLevel::H1 => Color::Yellow,
-                        HeadingLevel::H2 => Color::Cyan,
-                        _ => Color::Magenta,
+                    let heading_style = match level {
+                        HeadingLevel::H1 => scheme.markdown.heading_h1,
+                        HeadingLevel::H2 => scheme.markdown.heading_h2,
+                        _ => scheme.markdown.heading_h3,
                     };
-                    style_stack.push(style.fg(color).add_modifier(Modifier::BOLD));
+                    style_stack.push(style.patch(heading_style));
                     let prefix = "#".repeat(level as usize) + " ";
                     push_span(&mut current, prefix, *style_stack.last().unwrap());
                 }
@@ -162,10 +164,10 @@ pub fn render(source: &str) -> Rendered {
                 Tag::Strong => style_stack.push(style.add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => style_stack.push(style.add_modifier(Modifier::CROSSED_OUT)),
                 Tag::BlockQuote(_) => {
-                    style_stack.push(style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                    style_stack.push(style.patch(scheme.markdown.blockquote));
                     push_span(
                         &mut current,
-                        "\u{2503} ".to_string(),
+                        scheme.markdown.blockquote_marker.clone(),
                         *style_stack.last().unwrap(),
                     );
                 }
@@ -183,12 +185,12 @@ pub fn render(source: &str) -> Rendered {
                     if !code_lang.is_empty() {
                         lines.push(Line::from(Span::styled(
                             format!("  ```{code_lang}"),
-                            Style::default().fg(Color::DarkGray),
+                            scheme.markdown.code_fence_marker,
                         )));
                     } else {
                         lines.push(Line::from(Span::styled(
                             "  ```",
-                            Style::default().fg(Color::DarkGray),
+                            scheme.markdown.code_fence_marker,
                         )));
                     }
                 }
@@ -207,16 +209,25 @@ pub fn render(source: &str) -> Rendered {
                     push_span(
                         &mut current,
                         format!("{indent}{marker}"),
-                        style.fg(Color::White),
+                        style.patch(scheme.markdown.list_marker),
                     );
                 }
                 Tag::Link { dest_url, .. } => {
-                    style_stack.push(style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
+                    style_stack.push(style.patch(scheme.markdown.link));
                     link_stack.push((current.len(), dest_url.to_string()));
                 }
-                Tag::Image { .. } => style_stack.push(style.fg(Color::Magenta)),
-                Tag::TableHead | Tag::TableRow | Tag::TableCell => {
-                    style_stack.push(style.add_modifier(Modifier::BOLD));
+                Tag::Image { .. } => style_stack.push(style.patch(scheme.markdown.image_alt)),
+                Tag::TableHead => {
+                    in_table_head = true;
+                    style_stack.push(style);
+                }
+                Tag::TableRow => style_stack.push(style),
+                Tag::TableCell => {
+                    let mut cell_style = style;
+                    if in_table_head && scheme.markdown.table_header_bold {
+                        cell_style = cell_style.add_modifier(Modifier::BOLD);
+                    }
+                    style_stack.push(cell_style);
                 }
                 _ => {}
             },
@@ -239,11 +250,18 @@ pub fn render(source: &str) -> Rendered {
                 }
                 TagEnd::CodeBlock => {
                     in_code_block = false;
-                    highlight_code_block(&code_buffer, &code_lang, &syntax_set, theme, &mut lines);
+                    highlight_code_block(
+                        &code_buffer,
+                        &code_lang,
+                        &syntax_set,
+                        theme,
+                        scheme.markdown.code_block_bg,
+                        &mut lines,
+                    );
                     code_buffer.clear();
                     lines.push(Line::from(Span::styled(
                         "  ```",
-                        Style::default().fg(Color::DarkGray),
+                        scheme.markdown.code_fence_marker,
                     )));
                     lines.push(Line::from(""));
                 }
@@ -266,9 +284,21 @@ pub fn render(source: &str) -> Rendered {
                 TagEnd::Image => {
                     style_stack.pop();
                 }
-                TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell => {
+                TagEnd::TableHead => {
+                    in_table_head = false;
+                    style_stack.pop();
+                    flush_line(&mut current, &mut lines, &mut pending_links, &mut links);
+                }
+                TagEnd::TableRow => {
+                    style_stack.pop();
+                    flush_line(&mut current, &mut lines, &mut pending_links, &mut links);
+                }
+                TagEnd::TableCell => {
                     style_stack.pop();
                     push_span(&mut current, "  ".to_string(), style);
+                }
+                TagEnd::Table => {
+                    lines.push(Line::from(""));
                 }
                 _ => {}
             },
@@ -284,7 +314,7 @@ pub fn render(source: &str) -> Rendered {
                 push_span(
                     &mut current,
                     format!(" {} ", text.into_string()),
-                    Style::default().fg(Color::Green).bg(Color::Rgb(40, 40, 40)),
+                    scheme.markdown.code_inline,
                 );
             }
             Event::SoftBreak => {
@@ -306,8 +336,11 @@ pub fn render(source: &str) -> Rendered {
                     flush_line(&mut current, &mut lines, &mut pending_links, &mut links);
                 }
                 lines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(60),
-                    Style::default().fg(Color::DarkGray),
+                    scheme
+                        .markdown
+                        .horizontal_rule_glyph
+                        .repeat(scheme.markdown.horizontal_rule_width),
+                    scheme.markdown.horizontal_rule,
                 )));
             }
             Event::TaskListMarker(checked) => {
@@ -347,9 +380,15 @@ pub fn link_col_range(line: &Line<'_>, link: &Link) -> (u16, u16) {
 mod tests {
     use super::*;
 
+    /// Renders with the built-in default scheme, for tests that only care
+    /// about text/link structure, not styling.
+    fn render_default(source: &str) -> Rendered {
+        render(source, &Scheme::default_builtin())
+    }
+
     #[test]
     fn extracts_link_target_and_text() {
-        let rendered = render("see [the docs](./other.md) for more");
+        let rendered = render_default("see [the docs](./other.md) for more");
         assert_eq!(rendered.links.len(), 1);
         let link = &rendered.links[0];
         assert_eq!(link.target, "./other.md");
@@ -364,7 +403,7 @@ mod tests {
 
     #[test]
     fn link_col_range_matches_preceding_text_width() {
-        let rendered = render("abc [x](y)");
+        let rendered = render_default("abc [x](y)");
         let link = &rendered.links[0];
         let line = &rendered.text.lines[link.line];
         let (start, end) = link_col_range(line, link);
@@ -374,13 +413,13 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_links() {
-        let rendered = render("just plain text, no links here");
+        let rendered = render_default("just plain text, no links here");
         assert!(rendered.links.is_empty());
     }
 
     #[test]
     fn fenced_code_block_is_highlighted_without_touching_links() {
-        let rendered = render("```rust\nfn main() {}\n```");
+        let rendered = render_default("```rust\nfn main() {}\n```");
         assert!(rendered.links.is_empty());
         // fence lines + at least one highlighted body line should be present
         assert!(rendered.text.lines.len() >= 3);
@@ -389,7 +428,7 @@ mod tests {
     #[test]
     fn frontmatter_is_stripped_before_parsing() {
         let src = "---\ntitle: hi\ntags: [a, b]\n---\n\n# Heading\n\nbody text\n";
-        let rendered = render(src);
+        let rendered = render_default(src);
         let first_line: String = rendered.text.lines[0]
             .spans
             .iter()
@@ -400,13 +439,13 @@ mod tests {
 
     #[test]
     fn frontmatter_only_file_renders_empty() {
-        let rendered = render("---\ntitle: hi\n---\n");
+        let rendered = render_default("---\ntitle: hi\n---\n");
         assert!(rendered.text.lines.is_empty() || rendered.text.lines == vec![Line::from("")]);
     }
 
     #[test]
     fn no_frontmatter_is_left_untouched() {
-        let rendered = render("# Heading\n\nbody\n");
+        let rendered = render_default("# Heading\n\nbody\n");
         let first_line: String = rendered.text.lines[0]
             .spans
             .iter()
@@ -419,7 +458,7 @@ mod tests {
     fn dashes_without_closing_fence_are_not_treated_as_frontmatter() {
         // "---" alone at the top with no second "---" is a thematic break,
         // not frontmatter - must not be swallowed.
-        let rendered = render("---\nnot frontmatter, just a rule above this text\n");
+        let rendered = render_default("---\nnot frontmatter, just a rule above this text\n");
         let joined: String = rendered
             .text
             .lines
@@ -428,5 +467,248 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(joined.contains("not frontmatter"));
+    }
+
+    // The following tests assert on `Span.style`/`Color` values directly —
+    // proving a scheme's colors actually flow into rendering, not just that
+    // `default_builtin()` happens to match the old hardcoded literals.
+    // Each uses a distinguishable, arbitrary color/glyph not shared with
+    // `default_builtin()`.
+
+    #[test]
+    fn heading_h1_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.heading_h1 = Style::default().fg(Color::Rgb(0x12, 0x34, 0x56));
+        let rendered = render("# Title", &scheme);
+        assert_eq!(
+            rendered.text.lines[0].spans[0].style.fg,
+            Some(Color::Rgb(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn heading_h2_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.heading_h2 = Style::default().fg(Color::Rgb(0x22, 0x33, 0x44));
+        let rendered = render("## Title", &scheme);
+        assert_eq!(
+            rendered.text.lines[0].spans[0].style.fg,
+            Some(Color::Rgb(0x22, 0x33, 0x44))
+        );
+    }
+
+    #[test]
+    fn heading_h3_and_deeper_use_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.heading_h3 = Style::default().fg(Color::Rgb(0x55, 0x66, 0x77));
+        let h3 = render("### Title", &scheme);
+        let h6 = render("###### Title", &scheme);
+        assert_eq!(
+            h3.text.lines[0].spans[0].style.fg,
+            Some(Color::Rgb(0x55, 0x66, 0x77))
+        );
+        assert_eq!(
+            h6.text.lines[0].spans[0].style.fg,
+            Some(Color::Rgb(0x55, 0x66, 0x77))
+        );
+    }
+
+    #[test]
+    fn blockquote_uses_scheme_style_and_marker() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.blockquote = Style::default().fg(Color::Rgb(1, 2, 3));
+        scheme.markdown.blockquote_marker = ">> ".to_string();
+        let rendered = render("> quoted", &scheme);
+        let line = &rendered.text.lines[0];
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with(">> "));
+        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn code_fence_marker_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.code_fence_marker = Style::default().fg(Color::Rgb(9, 9, 9));
+        let rendered = render("```rust\nfn x() {}\n```", &scheme);
+        let fence_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("```rust")))
+            .expect("fence line present");
+        assert_eq!(fence_line.spans[0].style.fg, Some(Color::Rgb(9, 9, 9)));
+    }
+
+    #[test]
+    fn code_block_bg_uses_scheme_color() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.code_block_bg = Style::default().bg(Color::Rgb(4, 5, 6));
+        let rendered = render("```\nhello\n```", &scheme);
+        let body_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("hello")))
+            .expect("code body line present");
+        assert_eq!(body_line.spans[0].style.bg, Some(Color::Rgb(4, 5, 6)));
+    }
+
+    #[test]
+    fn inline_code_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.code_inline = Style::default()
+            .fg(Color::Rgb(7, 7, 7))
+            .bg(Color::Rgb(8, 8, 8));
+        let rendered = render("use `code` here", &scheme);
+        let line = &rendered.text.lines[0];
+        let span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("code"))
+            .expect("code span present");
+        assert_eq!(span.style.fg, Some(Color::Rgb(7, 7, 7)));
+        assert_eq!(span.style.bg, Some(Color::Rgb(8, 8, 8)));
+    }
+
+    #[test]
+    fn list_marker_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.list_marker = Style::default().fg(Color::Rgb(10, 20, 30));
+        let rendered = render("- item", &scheme);
+        let line = &rendered.text.lines[0];
+        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(10, 20, 30)));
+    }
+
+    #[test]
+    fn link_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.link = Style::default().fg(Color::Rgb(11, 22, 33));
+        let rendered = render("[text](url)", &scheme);
+        let link = &rendered.links[0];
+        let line = &rendered.text.lines[link.line];
+        assert_eq!(
+            line.spans[link.span_start].style.fg,
+            Some(Color::Rgb(11, 22, 33))
+        );
+    }
+
+    #[test]
+    fn image_alt_uses_scheme_style() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.image_alt = Style::default().fg(Color::Rgb(44, 55, 66));
+        let rendered = render("![alt text](pic.png)", &scheme);
+        let line = &rendered.text.lines[0];
+        let span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("alt"))
+            .expect("alt span present");
+        assert_eq!(span.style.fg, Some(Color::Rgb(44, 55, 66)));
+    }
+
+    #[test]
+    fn horizontal_rule_uses_scheme_style_and_glyph() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.horizontal_rule = Style::default().fg(Color::Rgb(77, 88, 99));
+        scheme.markdown.horizontal_rule_glyph = "=".to_string();
+        scheme.markdown.horizontal_rule_width = 5;
+        let rendered = render("before\n\n---\n\nafter", &scheme);
+        let rule_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains('=')))
+            .expect("rule line present");
+        let text: String = rule_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "=====");
+        assert_eq!(rule_line.spans[0].style.fg, Some(Color::Rgb(77, 88, 99)));
+    }
+
+    #[test]
+    fn syntect_theme_affects_code_block_colors() {
+        let ocean = Scheme::default_builtin();
+        let mut solarized = Scheme::default_builtin();
+        solarized.syntax_theme = syntect::highlighting::ThemeSet::load_defaults()
+            .themes
+            .get("Solarized (dark)")
+            .expect("bundled \"Solarized (dark)\" theme available")
+            .clone();
+
+        let src = "```rust\nfn main() {}\n```";
+        let ocean_colors: Vec<_> = render(src, &ocean)
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.style.fg)
+            .collect();
+        let solarized_colors: Vec<_> = render(src, &solarized)
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.style.fg)
+            .collect();
+        assert_ne!(ocean_colors, solarized_colors);
+    }
+
+    #[test]
+    fn table_header_row_is_bold_and_separate_from_body_rows() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.table_header_bold = true;
+        let src = "| Key | Action |\n|---|---|\n| q | quit |\n| j | scroll |\n";
+        let rendered = render(src, &scheme);
+
+        let line_text =
+            |line: &Line<'_>| -> String { line.spans.iter().map(|s| s.content.as_ref()).collect() };
+        let texts: Vec<String> = rendered.text.lines.iter().map(line_text).collect();
+        // Exactly: header row, each body row, one trailing blank line after the
+        // table — no spurious blank line between the header and first row.
+        assert_eq!(texts, vec!["Key  Action  ", "q  quit  ", "j  scroll  ", ""]);
+
+        let header_line = &rendered.text.lines[0];
+        let body_line = &rendered.text.lines[1];
+
+        // Header and first body row must be on separate lines, not run together.
+        assert!(!line_text(header_line).contains("quit"));
+        assert!(
+            header_line
+                .spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
+        assert!(
+            body_line
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn table_header_bold_disabled_leaves_header_unbolded() {
+        let mut scheme = Scheme::default_builtin();
+        scheme.markdown.table_header_bold = false;
+        let src = "| Key | Action |\n|---|---|\n| q | quit |\n";
+        let rendered = render(src, &scheme);
+
+        let header_line = rendered
+            .text
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("Key")
+            })
+            .expect("header line present");
+        assert!(
+            header_line
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
 }
