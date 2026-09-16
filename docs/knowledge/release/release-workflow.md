@@ -56,6 +56,13 @@ Installer to treat the package as 32-bit (wrong `Program Files` directory, HKLM 
 redirection). `wix/License.rtf` embeds the full Apache-2.0 text (not just a link to it), since
 the installer's license dialog is a recipient's copy of the license under License §4(a).
 
+`wix/main.wxs:8-17` (the `<?if $(sys.BUILDARCH) = x64 ...?>` preprocessor block, before `<Wix>`)
+must stay — it's what *defines* `PlatformProgramFilesFolder`, which the `TARGETDIR` directory
+tree references as `$(var.PlatformProgramFilesFolder)` (`wix/main.wxs:49`). Removing that block
+(or copying only the `Directory` line without it, as happened once) fails `candle.exe` with
+`CNDL0150: Undefined preprocessor variable`, only on an actual Windows/WiX run — nothing in this
+repo can catch it locally, since candle only runs on `windows-latest` in CI.
+
 ## Checksum-file invariant
 
 Every `*.sha256` file must record the artifact's **basename**, because `gh release upload`
