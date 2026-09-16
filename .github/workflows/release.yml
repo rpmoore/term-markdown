@@ -21,6 +21,8 @@ jobs:
         include:
           - runner: ubuntu-latest
             platform: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
           - runner: macos-14 # arm64
             platform: macos-aarch64
           # macos-13 was retired 2025-12-04 (actions/runner-images#13046);
