@@ -37,7 +37,7 @@ Row accounting below, not a logical-line index), `selected_link: Option<usize>` 
 `links`, for keyboard navigation), `history: Vec<(PathBuf, u16)>` (back-stack of `(path,
 scroll)` pairs pushed on forward navigation), `status: Option<String>` (transient message
 shown in place of the scroll-position status line — set by link-follow outcomes and mouse-click
-misses, cleared on the next key press other than Tab/Shift-Tab), and `row_starts_cache: Vec<u32>`
+misses, cleared on the next key press other than Tab/Shift-Tab/Down/Up), and `row_starts_cache: Vec<u32>`
 + `row_starts_cache_width: Option<u16>` (memoized `row_starts` result — see Row accounting
 below).
 
@@ -142,20 +142,21 @@ those would double-trigger scroll actions.
 | Key | Action |
 |---|---|
 | `q`, `Esc` | quit |
-| `j`, `Down` | scroll +1 row |
-| `k`, `Up` | scroll -1 row |
+| `j` | scroll +1 row |
+| `k` | scroll -1 row |
 | `d`, `PageDown` | scroll +half viewport |
 | `u`, `PageUp` | scroll -half viewport |
 | `g`, `Home` | jump to top |
 | `G`, `End` | jump to bottom |
-| `Tab` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:332-345`) |
-| `Shift+Tab` | select previous link |
+| `Tab`, `Down` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:332-345`) |
+| `Shift+Tab`, `Up` | select previous link |
 | `Enter` | follow the selected link (`follow_selected`, `src/main.rs:379-384`) |
 | `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:386-393`) |
 
 The status bar shows `app.status` when set, otherwise the default scroll-position + key-hint
 line — so a link-follow outcome (external link, not-found target, no-previous-page,
-click-related messages, etc.) replaces the hint line until the next non-Tab key.
+click-related messages, etc.) replaces the hint line until the next key other than
+Tab/Shift-Tab/Down/Up.
 
 ## Link navigation
 
@@ -190,8 +191,8 @@ mutates anything (pushes `(old_path, old_scroll)` onto `history` then calls `loa
 variant just sets `status` to an explanatory message.
 
 Selection and click share one underlying mechanism but diverge at the last step:
-`Tab`/`Shift+Tab` move `selected_link` and call `ensure_line_visible` to scroll the target line
-into the viewport without auto-following; `Enter` then calls `follow_selected`, which clones the
+`Tab`/`Shift+Tab`/`Down`/`Up` move `selected_link` and call `ensure_line_visible` to scroll the
+target line into the viewport without auto-following; `Enter` then calls `follow_selected`, which clones the
 selected link's target and calls `follow`. A mouse left-click instead resolves the clicked
 screen row via `line_at_row`, and — only when the click landed on row 0 of its logical line (see
 Mouse hit-testing below) — calls `link_at` (`src/main.rs:433-441`) to hit-test the column

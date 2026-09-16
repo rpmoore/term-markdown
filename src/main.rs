@@ -544,17 +544,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                    if !matches!(
+                        key.code,
+                        KeyCode::Tab | KeyCode::BackTab | KeyCode::Down | KeyCode::Up
+                    ) {
                         app.status = None;
                     }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            app.scroll_by(1, body_height, content_width)
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            app.scroll_by(-1, body_height, content_width)
-                        }
+                        KeyCode::Char('j') => app.scroll_by(1, body_height, content_width),
+                        KeyCode::Char('k') => app.scroll_by(-1, body_height, content_width),
+                        KeyCode::Down => app.select_next_link(true, body_height, content_width),
+                        KeyCode::Up => app.select_next_link(false, body_height, content_width),
                         KeyCode::Char('d') | KeyCode::PageDown => {
                             app.scroll_by(body_height as i32 / 2, body_height, content_width)
                         }
