@@ -114,7 +114,7 @@ jobs:
           sha256sum "term-markdown-${RELEASE_TAG}-windows-x86_64.zip" > "term-markdown-${RELEASE_TAG}-windows-x86_64.zip.sha256"
 
       - name: Install cargo-wix
-        run: cargo install cargo-wix --locked
+        run: cargo install cargo-wix --version 0.3.9 --locked
 
       - name: Build MSI installer
         run: cargo wix --nocapture --no-build --target-bin-dir target\release --output "target\wix\term-markdown-${env:RELEASE_TAG}-windows-x86_64.msi"

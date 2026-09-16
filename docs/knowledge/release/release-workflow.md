@@ -40,7 +40,9 @@ binary (`.github/workflows/release.yml:103-104`):
 
 - A portable zip (`.github/workflows/release.yml:106-109`), checksummed in place.
 - An MSI built by `cargo-wix` (`.github/workflows/release.yml:116-120`), driven by
-  `wix/main.wxs` and `wix/License.rtf`.
+  `wix/main.wxs` and `wix/License.rtf`. `cargo-wix` is installed pinned to a specific version
+  (`--version 0.3.9`, `.github/workflows/release.yml:117`) rather than "latest", so a future
+  cargo-wix release can't silently change or break tagged-release builds; bump it deliberately.
 
 `cargo-wix` has **no `build` subcommand** — the installer is created by invoking `cargo wix`
 directly (the default/`create` command); passing a bare `build` argument is treated as a WiX
