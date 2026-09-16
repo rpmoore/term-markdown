@@ -8,7 +8,7 @@
 //! Pure filesystem lookups only — no terminal I/O.
 
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 /// Bundle root for the bundle containing `file`, detected by walking up from
@@ -73,30 +73,83 @@ fn git_toplevel(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Upper bound on bytes read looking for the closing frontmatter fence. A
+/// directory being walked for bundle-root detection may contain an
+/// `index.md` that is huge (or an unclosed `---` that never resolves) — this
+/// bounds both the memory and time `declares_okf_version` can burn on a
+/// single candidate, in a walk that runs on every file open with no user
+/// interaction to gate it. Enforced by wrapping the file in [`Read::take`]
+/// rather than counting bytes per line after the fact: a `read_line` call
+/// has no length limit of its own, so a single pathological line with no
+/// newline for tens of megabytes would otherwise be read into memory in one
+/// call before a manual byte count ever got a chance to reject it.
+const MAX_FRONTMATTER_SCAN_BYTES: u64 = 64 * 1024;
+
 /// Whether `index` opens with a `---` frontmatter block that contains a
-/// top-level `okf_version:` key. An unreadable file, no opening fence, or an
-/// unclosed fence (mirroring `markdown::strip_frontmatter`) all count as
-/// "no", as does an indented `okf_version:` nested under another key or
-/// inside a block scalar. The file is already in memory, so the scan for the
-/// closing fence is unbounded — a long `tags:` list must not hide the key.
+/// top-level `okf_version:` key. An unreadable file, no opening fence, an
+/// unclosed fence (mirroring `markdown::strip_frontmatter`), or a fence that
+/// doesn't close within [`MAX_FRONTMATTER_SCAN_BYTES`] all count as "no", as
+/// does an indented `okf_version:` nested under another key or inside a
+/// block scalar. Reads line-by-line via a `BufReader` over a
+/// [`Read::take`]-limited handle rather than `fs::read_to_string`, so a huge
+/// `index.md` is never loaded in full regardless of line length: a file that
+/// doesn't even open with `---` costs one (bounded) line read, and a
+/// pathological file with no closing fence is abandoned once the byte cap is
+/// hit rather than read to EOF. Only the frontmatter block itself needs to
+/// be valid UTF-8 — invalid bytes in the document body, past the closing
+/// fence (or past the byte cap), are never read and so don't affect the
+/// result, unlike the old whole-file `fs::read_to_string`.
+///
+/// A line with no trailing `\n` that also exhausted the byte budget is
+/// treated as unclosed rather than checked against `"---"`: `Take` hitting
+/// its limit mid-line is indistinguishable from genuine end-of-file by the
+/// return value alone, so without this check a line that merely *starts*
+/// with `---` (and continues for a long time after) could be mistaken for a
+/// real closing fence if the cap happened to land exactly three bytes in.
+/// The one false negative this trades away — a file whose real, valid
+/// closing fence sits with no trailing newline at a byte offset exactly
+/// equal to the cap — is left unresolved deliberately: erring toward "not a
+/// bundle root" is safe (fixable with `--root`), where erring toward a false
+/// match is not.
 fn declares_okf_version(index: &Path) -> bool {
-    let Ok(source) = fs::read_to_string(index) else {
+    let Ok(file) = fs::File::open(index) else {
         return false;
     };
-    let mut lines = source.lines().map(str::trim_end);
-    if lines.next() != Some("---") {
+    let mut reader = BufReader::new(file.take(MAX_FRONTMATTER_SCAN_BYTES));
+    let mut line = String::new();
+    let Ok(n) = reader.read_line(&mut line) else {
+        return false;
+    };
+    let mut consumed = n as u64;
+    if line.trim_end() != "---" {
         return false;
     }
+
     let mut found = false;
-    for line in lines {
-        if line == "---" {
+    loop {
+        line.clear();
+        let n = match reader.read_line(&mut line) {
+            // Genuine EOF, or invalid UTF-8: unclosed fence either way.
+            Ok(0) | Err(_) => return false,
+            Ok(n) => n,
+        };
+        consumed += n as u64;
+        // A line with no trailing `\n` is ambiguous unless it also hit
+        // genuine EOF: `Take` returning early once the scan cap is spent
+        // looks identical to a real end-of-file mid-line, so a line
+        // truncated right after an incidental "---" could otherwise be
+        // mistaken for a real closing fence it never reached.
+        if !line.ends_with('\n') && consumed >= MAX_FRONTMATTER_SCAN_BYTES {
+            return false;
+        }
+        let trimmed = line.trim_end();
+        if trimmed == "---" {
             return found;
         }
-        if line.starts_with("okf_version:") {
+        if trimmed.starts_with("okf_version:") {
             found = true;
         }
     }
-    false
 }
 
 #[cfg(test)]
@@ -269,6 +322,65 @@ mod tests {
         let t = temp_tree("bundle-fm-unclosed");
         let index = t.join("index.md");
         touch(&index, "---\nokf_version: \"0.2\"\n\n# never closed\n");
+        assert!(!declares_okf_version(&index));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn declares_okf_version_false_when_fence_never_closes_within_scan_cap() {
+        // Regression test: a huge or hostile `index.md` with an opening
+        // fence that never closes must be abandoned once the scan cap is
+        // hit, not read to EOF (previously `fs::read_to_string` loaded the
+        // whole file first, so a 1 GiB unclosed-fence file was fully
+        // buffered in memory before this function even started scanning).
+        let t = temp_tree("bundle-fm-scan-cap");
+        let index = t.join("index.md");
+        let filler: String = "tags:\n".repeat(MAX_FRONTMATTER_SCAN_BYTES as usize);
+        touch(&index, &format!("---\nokf_version: \"0.2\"\n{filler}"));
+        assert!(!declares_okf_version(&index));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn declares_okf_version_false_for_single_huge_unterminated_line_within_cap() {
+        // Regression test for the gap in the first version of the scan-cap
+        // fix: `BufRead::read_line` has no length limit of its own, so a
+        // single pathological line with no newline for many megabytes would
+        // be read into memory in one call, before any manual byte-count
+        // check ran. The fix wraps the file in `Read::take` so the total
+        // bytes read is bounded regardless of line length; this file is one
+        // line, several times over `MAX_FRONTMATTER_SCAN_BYTES`, with no
+        // newline anywhere after the opening fence.
+        let t = temp_tree("bundle-fm-huge-line");
+        let index = t.join("index.md");
+        let huge_line = "x".repeat(MAX_FRONTMATTER_SCAN_BYTES as usize * 4);
+        touch(&index, &format!("---\n{huge_line}"));
+        assert!(!declares_okf_version(&index));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn declares_okf_version_false_when_cap_truncates_mid_line_onto_a_coincidental_dash_run() {
+        // Regression test for a false positive in the `Read::take`-based
+        // scan cap: a line that merely *starts* with "---" but keeps going
+        // unclosed must not be mistaken for a real closing fence just
+        // because the byte cap happens to land exactly three bytes into it.
+        // The preceding filler is one complete, newline-terminated line so
+        // the vulnerable line starts fresh at its own "-"; the cap is sized
+        // to land exactly after that line's third byte, so a version of the
+        // fix that trusted any line reading exactly "---" (rather than
+        // checking it actually hit genuine EOF, not just the cap) would
+        // wrongly return `true` here.
+        let t = temp_tree("bundle-fm-cap-dash-coincidence");
+        let index = t.join("index.md");
+        let prefix = "---\nokf_version: \"0.2\"\n";
+        let filler_len = MAX_FRONTMATTER_SCAN_BYTES as usize - 3 - prefix.len() - 1;
+        let mut content = String::from(prefix);
+        content.push_str(&"a".repeat(filler_len));
+        content.push('\n'); // filler is a complete line, so the next line starts fresh
+        content.push_str("---"); // cap lands exactly here, mid-line
+        content.push_str(&"z".repeat(1000)); // proves the line never actually closes
+        touch(&index, &content);
         assert!(!declares_okf_version(&index));
         std::fs::remove_dir_all(&t).ok();
     }
