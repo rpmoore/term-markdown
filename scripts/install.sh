@@ -97,14 +97,16 @@ arch="$(uname -m)"
 
 case "$os/$arch" in
   Linux/x86_64|Linux/amd64) platform="linux-x86_64" ;;
+  Linux/aarch64|Linux/arm64) platform="linux-aarch64" ;;
   Darwin/arm64|Darwin/aarch64) platform="macos-aarch64" ;;
   Darwin/x86_64) platform="macos-x86_64" ;;
-  *) die "unsupported platform: $os/$arch (supported: Linux x86_64, macOS arm64/x86_64)" ;;
+  *) die "unsupported platform: $os/$arch (supported: Linux x86_64/arm64, macOS arm64/x86_64)" ;;
 esac
 
-# Release binaries for Linux are built on ubuntu-latest and are glibc-linked.
-# A musl-only system (e.g. Alpine) reports Linux/x86_64 too, but the binary
-# won't run there — ldd itself is the musl libc on those systems and says so.
+# Release binaries for Linux (x86_64 and arm64) are built on GitHub-hosted
+# Ubuntu runners and are glibc-linked. A musl-only system (e.g. Alpine)
+# reports as Linux too, but the binary won't run there — ldd itself is the
+# musl libc on those systems and says so.
 if [ "$os" = "Linux" ] && command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
   die "term-markdown's release binary is glibc-linked and will not run on musl-based systems (e.g. Alpine); detected musl libc"
 fi

@@ -8,7 +8,7 @@ A terminal markdown viewer with syntax-highlighted code blocks and link navigati
 curl -fsSL https://raw.githubusercontent.com/rpmoore/term-markdown/main/scripts/install.sh | bash
 ```
 
-Downloads the latest release for your platform (Linux x86_64, macOS arm64/x86_64), verifies its checksum, and installs `term-markdown` to `~/.local/bin` — no root/sudo needed. See `scripts/install.sh --help` for options (pinning a version, a different install directory, non-interactive installs).
+Downloads the latest release for your platform (Linux x86_64/arm64, macOS arm64/x86_64), verifies its checksum, and installs `term-markdown` to `~/.local/bin` — no root/sudo needed. See `scripts/install.sh --help` for options (pinning a version, a different install directory, non-interactive installs).
 
 Or build from source:
 
