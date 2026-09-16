@@ -10,23 +10,23 @@ tags: [tui, ratatui, crossterm]
 
 ## Lifecycle
 
-`main` (`src/main.rs:361-378`) parses CLI args via `clap` (`Args { file: PathBuf, root:
-Option<PathBuf>, scheme: Option<String> }`, `src/main.rs:71-82`), fixes the bundle root for
+`main` (`src/main.rs:385-402`) parses CLI args via `clap` (`Args { file: PathBuf, root:
+Option<PathBuf>, scheme: Option<String> }`, `src/main.rs:75-86`), fixes the bundle root for
 absolute links — `--root` if given (validated and canonicalized by `explicit_root`,
-`src/main.rs:382-390`), else `bundle::detect_root(&args.file)` (see
+`src/main.rs:406-414`), else `bundle::detect_root(&args.file)` (see
 [bundle-root](bundle-root.md)) — resolves the active color scheme via `scheme::Scheme::load`
 (see [scheme-loading](../config/scheme-loading.md)), all three of which fail *before* the
 terminal is touched, builds `App` (which eagerly reads and renders the file — `App::new`,
-`src/main.rs:200-214`), enters the terminal (`setup_terminal`, `src/main.rs:392-397`: raw mode +
+`src/main.rs:204-218`), enters the terminal (`setup_terminal`, `src/main.rs:416-421`: raw mode +
 alt screen + mouse capture), runs the event loop, then unconditionally restores the terminal
-(`restore_terminal`, `src/main.rs:399-408`: disable raw mode, disable mouse capture, leave alt
+(`restore_terminal`, `src/main.rs:423-432`: disable raw mode, disable mouse capture, leave alt
 screen, show cursor) before propagating `run`'s result. Restoration runs even if `run` returns
 `Err`, since it's called on the line after `run` rather than inside a `?`-chained expression —
 this prevents leaving the user's terminal in raw/alt-screen/mouse-capture mode on error.
 
 ## App state
 
-`App` (`src/main.rs:185-197`) holds: `path` (current file, doubles as the window title and, via
+`App` (`src/main.rs:189-201`) holds: `path` (current file, doubles as the window title and, via
 its parent dir, the base for resolving *relative* link targets), `bundle_root: PathBuf` (base
 for absolute `/x` link targets — fixed in `main` at startup and never touched by
 `load`/`go_back`, so climbing out of the bundle via a `../` link doesn't move it), `scheme:
@@ -39,7 +39,7 @@ scroll)` pairs pushed on forward navigation), and `status: Option<String>` (tran
 shown in place of the scroll-position status line — set by link-follow outcomes and mouse-click
 misses, cleared on the next key press other than Tab/Shift-Tab).
 
-`App::load` (`src/main.rs:216-226`) is the shared path for both initial load (`App::new`) and
+`App::load` (`src/main.rs:220-230`) is the shared path for both initial load (`App::new`) and
 navigating to a new file: it re-reads and calls `markdown::render(&source, &self.scheme)`,
 replacing `path`/`body`/`links` and resetting `scroll`/`selected_link` to 0/`None`. It does not
 touch `history` or `scheme` — callers manage the back-stack around it, and the scheme never
@@ -55,22 +55,39 @@ mapping a clicked screen row back to a link (as an earlier version of this code 
 soon as any earlier line word-wraps — every logical line after the first wrapped one lands on
 the wrong screen row.
 
-`wrapped_row_count(text, width)` (`src/main.rs:39-66`) reimplements ratatui's greedy word-wrap
+`wrapped_row_count(text, width)` (`src/main.rs:43-70`) reimplements ratatui's greedy word-wrap
 closely enough to count rows correctly (ratatui's own wrapper, `WordWrapper`, lives in a private
-module and isn't reusable). Its row count saturates at `u16::MAX` rather than truncating via `as
-u16` — `Paragraph::scroll` itself takes a `u16` offset, so a document can never scroll past that
-many rows anyway, and a wraparound-truncated count (e.g. a pathologically long unbroken line
-landing on a small or zero value) would corrupt every line's accumulated offset after it, not
-just cap that one line. `App::row_starts(width)` (`src/main.rs:234-244`) builds the cumulative
-per-line row offsets from it via `saturating_add` — length `lines.len() + 1`, with the trailing
-entry equal to the total row count (itself capped at `u16::MAX` once enough lines accumulate).
-`max_scroll`, `scroll_by`, and `ensure_line_visible` (`src/main.rs:261-284`) all clamp/compute
-against this total rather than `lines.len()` — `ensure_line_visible` uses saturating arithmetic
-throughout (`row.saturating_add(1).saturating_sub(viewport_height)`, guarded by
-`row >= self.scroll.saturating_add(viewport_height)`) since `row` can legitimately be `u16::MAX`
-for a large enough document, and plain `row + 1` there would overflow. `line_at_row(row, width)`
-(`src/main.rs:249-259`) is the inverse: binary-searches `row_starts` (`partition_point`) to turn
-a screen row back into `(logical_line, sub_row_within_line)`.
+module and isn't reusable). It returns `u32`, not `u16`, and `App::row_starts(width)`
+(`src/main.rs:243-253`) — which builds the cumulative per-line row offsets from it via
+`saturating_add`, length `lines.len() + 1` with the trailing entry equal to the total row count —
+keeps that `u32` width too, rather than narrowing to `u16` at either point. `max_scroll` (returns
+`u32`) and `max_scroll_u16`/`scroll_by`/`ensure_line_visible` (`src/main.rs:270-308`) all
+clamp/compute against this total rather than `lines.len()`.
+
+Only `self.scroll` itself, and thus the final value handed to `Paragraph::scroll`, is a `u16` —
+matching ratatui's own offset type, which really can't address a row past `u16::MAX` no matter
+what. Everything *feeding into* that final value is deliberately kept wider: clamping row counts
+to `u16::MAX` before summing them (an earlier version of this fix did exactly that, via `rows as
+u16`) would make a document with, say, exactly 65,536 total rows indistinguishable from one with
+65,535 — undercounting the true total by one and leaving its last row permanently one row outside
+any viewport, even once the arithmetic no longer panicked. `ensure_line_visible` computes its
+target scroll position in `u32`
+(`(row + 1).saturating_sub(viewport_height as u32)`, guarded by
+`row >= self.scroll as u32 + viewport_height as u32`) and only clamps down to `u16` — via
+`.min(u16::MAX as u32) as u16` — for the assignment to `self.scroll`, so `row` reaching exactly
+`u16::MAX` no longer costs a row the way a `u16`-typed `row + 1` would. `max_scroll_u16`
+(`src/main.rs:282-284`) is the one place that narrows `max_scroll`'s `u32` result down to what
+`self.scroll` can hold; `scroll_by` and the draw loop's per-frame reclamp use it, while the status
+bar's `line {}/{}` display uses `max_scroll`'s `u32` directly since a displayed number needs no
+such clamping. `line_at_row(row, width)` (`src/main.rs:258-268`) — the inverse, binary-searching
+`row_starts` (`partition_point`) to turn a screen row back into `(logical_line,
+sub_row_within_line)` — takes and returns `u32` for the same reason, even though its only caller
+(mouse-click hit-testing) always passes a small value in practice.
+
+A document whose *true* total row count exceeds what a `u16` scroll offset can ever reach is a
+distinct, unavoidable ratatui limitation — that content is genuinely unreachable, `u32` internals
+or not — separate from the off-by-one this widening fixes, which was purely internal precision
+loss happening *before* hitting that real ceiling.
 
 This recomputes `row_starts` (an O(lines) pass with a per-line `String` allocation) on every
 draw and on every mouse click — acceptable for documents in the tens-to-hundreds of lines this
@@ -78,7 +95,7 @@ viewer targets, not cached beyond that.
 
 ## Draw loop
 
-`run` (`src/main.rs:410-541`) loops: draw a frame, then poll for input with a 250ms timeout so
+`run` (`src/main.rs:434-565`) loops: draw a frame, then poll for input with a 250ms timeout so
 the loop stays responsive without busy-waiting. Layout is two rows — `Constraint::Min(1)` body +
 `Constraint::Length(1)` status bar. `body_height`, `body_area`, and `content_width`
 (border-adjusted body width, i.e. `chunks[0].width - 2`, matching the width ratatui itself wraps
@@ -116,10 +133,10 @@ those would double-trigger scroll actions.
 | `u`, `PageUp` | scroll -half viewport |
 | `g`, `Home` | jump to top |
 | `G`, `End` | jump to bottom |
-| `Tab` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:286-299`) |
+| `Tab` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:310-323`) |
 | `Shift+Tab` | select previous link |
-| `Enter` | follow the selected link (`follow_selected`, `src/main.rs:333-338`) |
-| `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:340-348`) |
+| `Enter` | follow the selected link (`follow_selected`, `src/main.rs:357-362`) |
+| `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:364-372`) |
 
 The status bar shows `app.status` when set, otherwise the default scroll-position + key-hint
 line — so a link-follow outcome (external link, not-found target, no-previous-page,
@@ -127,33 +144,33 @@ click-related messages, etc.) replaces the hint line until the next non-Tab key.
 
 ## Link navigation
 
-`resolve_target` (`src/main.rs:108-139`) classifies a link's raw `target` string into a
-`Target`, given a `LinkBase { current_file, bundle_root }` (`src/main.rs:101-106` — a named pair
+`resolve_target` (`src/main.rs:112-143`) classifies a link's raw `target` string into a
+`Target`, given a `LinkBase { current_file, bundle_root }` (`src/main.rs:105-110` — a named pair
 rather than two positional `&Path`s, so the two bases can't be silently swapped). `Anchor` for a
 bare `#fragment` (same-file heading links — not implemented, reported via status only);
 `External` for anything with a `://` or `mailto:` scheme (not opened — no process is spawned for
-it) and for a `//host` protocol-relative URL (`src/main.rs:120-122`), which must never be
+it) and for a `//host` protocol-relative URL (`src/main.rs:124-126`), which must never be
 mistaken for a bundle-absolute path; otherwise the fragment is dropped and the path is probed
 for an existing file:
 
-- **absolute** (`/x/y.md`, `src/main.rs:123-131`): per OKF §5.1 these are *bundle-relative*, so
+- **absolute** (`/x/y.md`, `src/main.rs:127-135`): per OKF §5.1 these are *bundle-relative*, so
   the candidates are `<bundle_root>/x/y.md` first, then the literal filesystem path `/x/y.md`
   (for tool-generated links that really do point at the host filesystem). The bundle candidate
   has its `.`/`..` segments resolved and clamped at the root first (`clamp_to_root`,
-  `src/main.rs:144-156`), so `/../x.md` can't escape to a sibling of the bundle. The bundle root
+  `src/main.rs:148-160`), so `/../x.md` can't escape to a sibling of the bundle. The bundle root
   wins when both exist.
-- **relative** (anything else, `src/main.rs:131-138`): joined to `current_file`'s parent
+- **relative** (anything else, `src/main.rs:135-142`): joined to `current_file`'s parent
   directory, with no clamping to the bundle — links that deliberately climb out of the bundle
   (`../../src/x.md`) work.
 
-`probe` (`src/main.rs:162-175`) takes the first candidate that `is_file()`; if none does and the
-path ends in a `:<digits>` location suffix (`strip_line_suffix`, `src/main.rs:179-183`), it
+`probe` (`src/main.rs:166-179`) takes the first candidate that `is_file()`; if none does and the
+path ends in a `:<digits>` location suffix (`strip_line_suffix`, `src/main.rs:183-187`), it
 retries with that stripped, up to twice so `foo.go:154:12` also resolves. The line number itself
 is discarded (no scroll-to-line). Otherwise `NotFound` carries the first candidate for the path
 *as written*, and `follow` appends `(bundle root: …)` to the status message for absolute links
 so a misdetected root — fixable with `--root` — is obvious.
 
-`App::follow` (`src/main.rs:301-331`) drives the actual state change: only `Target::File`
+`App::follow` (`src/main.rs:325-355`) drives the actual state change: only `Target::File`
 mutates anything (pushes `(old_path, old_scroll)` onto `history` then calls `load`); every other
 variant just sets `status` to an explanatory message.
 
@@ -162,7 +179,7 @@ Selection and click share one underlying mechanism but diverge at the last step:
 into the viewport without auto-following; `Enter` then calls `follow_selected`, which clones the
 selected link's target and calls `follow`. A mouse left-click instead resolves the clicked
 screen row via `line_at_row`, and — only when the click landed on row 0 of its logical line (see
-Mouse hit-testing below) — calls `link_at` (`src/main.rs:351-358`) to hit-test the column
+Mouse hit-testing below) — calls `link_at` (`src/main.rs:375-382`) to hit-test the column
 against `links`; on a hit it sets `selected_link` *and* immediately calls `follow_selected` in
 the same step (click = select + open, no separate confirm).
 
