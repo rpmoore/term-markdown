@@ -37,7 +37,7 @@ Row accounting below, not a logical-line index), `selected_link: Option<usize>` 
 `links`, for keyboard navigation), `history: Vec<(PathBuf, u16)>` (back-stack of `(path,
 scroll)` pairs pushed on forward navigation), `status: Option<String>` (transient message
 shown in place of the scroll-position status line — set by link-follow outcomes and mouse-click
-misses, cleared on the next key press other than Tab/Shift-Tab/Down/Up), and
+misses, cleared on the next key press other than Tab/Shift+Tab/Down/Up), and
 `row_starts_cache: Vec<u32>` + `row_starts_cache_width: Option<u16>` (memoized `row_starts`
 result — see Row accounting below).
 
@@ -106,8 +106,12 @@ is unchanged, and per-frame/per-scroll cost is what the cache removes.
 
 ## Draw loop
 
-`run` (`src/main.rs:492-615`) loops: draw a frame, then poll for input with a 250ms timeout so
-the loop stays responsive without busy-waiting. Layout is two rows — `Constraint::Min(1)` body +
+`run` (`src/main.rs:525-623`) loops: draw a frame, then poll for input with a 250ms timeout so
+the loop stays responsive without busy-waiting. Key presses are handled by `dispatch_key`
+(`src/main.rs:493-523`), a free function taking `&mut App` rather than a `run`-local closure so
+key-to-action mapping is unit-testable without a live terminal — it returns `true` when the app
+should quit, which `run` turns into a `break` (`KeyCode::Char('q') | KeyCode::Esc` is the only
+case that returns `true`). Layout is two rows — `Constraint::Min(1)` body +
 `Constraint::Length(1)` status bar. `body_height`, `body_area`, and `content_width`
 (border-adjusted body width, i.e. `chunks[0].width - 2`, matching the width ratatui itself wraps
 at) are recomputed every frame and captured via closure into the outer scope so the
@@ -149,14 +153,14 @@ those would double-trigger scroll actions.
 | `g`, `Home` | jump to top |
 | `G`, `End` | jump to bottom |
 | `Tab`, `Down` | select next link, scroll into view (`select_next_link`, `src/main.rs:332-345`) |
-| `Shift+Tab`, `Up` | select previous link |
+| `Shift+Tab`, `Up` | select previous link, scroll into view (same path, `forward: false`) |
 | `Enter` | follow the selected link (`follow_selected`, `src/main.rs:379-384`) |
 | `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:386-393`) |
 
 The status bar shows `app.status` when set, otherwise the default scroll-position + key-hint
 line — so a link-follow outcome (external link, not-found target, no-previous-page,
 click-related messages, etc.) replaces the hint line until the next key other than
-Tab/Shift-Tab/Down/Up.
+Tab/Shift+Tab/Down/Up.
 
 ## Link navigation
 

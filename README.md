@@ -30,10 +30,10 @@ repo). Pass `--root <dir>` when the guess is wrong.
 | Key | Action |
 |---|---|
 | `q`, `Esc` | quit |
-| `j`/`k`, `↓`/`↑` | scroll |
+| `j`/`k` | scroll |
 | `d`/`u`, `PageDown`/`PageUp` | half-page scroll |
 | `g`/`G`, `Home`/`End` | jump to top/bottom |
-| `Tab` / `Shift+Tab` | select next/previous link |
+| `Tab`/`↓`, `Shift+Tab`/`↑` | select next/previous link |
 | `Enter` | follow selected link |
 | `Backspace` | go back |
 | mouse click | follow a link |
