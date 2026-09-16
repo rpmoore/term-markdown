@@ -24,6 +24,7 @@
             Languages='1033'
             Compressed='yes'
             InstallScope='perMachine'
+            Platform='x64'
             SummaryCodepage='1252'/>
 
         <MajorUpgrade
@@ -36,7 +37,7 @@
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='term-markdown'>
-                    <Component Id='binary0' Guid='*'>
+                    <Component Id='binary0' Guid='*' Win64='yes'>
                         <File
                             Id='exe0'
                             Name='term-markdown.exe'
@@ -45,7 +46,7 @@
                             KeyPath='yes'/>
                     </Component>
 
-                    <Component Id='Path' Guid='*'>
+                    <Component Id='Path' Guid='*' Win64='yes'>
                         <Environment
                             Id='PATH'
                             Name='PATH'

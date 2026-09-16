@@ -122,7 +122,7 @@ jobs:
       - name: Checksum MSI
         shell: bash
         run: |
-          sha256sum "target/wix/term-markdown-${RELEASE_TAG}-windows-x86_64.msi" > "term-markdown-${RELEASE_TAG}-windows-x86_64.msi.sha256"
+          (cd target/wix && sha256sum "term-markdown-${RELEASE_TAG}-windows-x86_64.msi") > "term-markdown-${RELEASE_TAG}-windows-x86_64.msi.sha256"
 
       - name: Upload release assets
         shell: bash
