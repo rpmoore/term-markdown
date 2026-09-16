@@ -1,0 +1,102 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  term-markdown WiX installer definition, built via `cargo wix`.
+  UpgradeCode below is fixed and must never change across releases —
+  it is what lets an MSI upgrade replace a prior install instead of
+  installing side-by-side.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='term-markdown'
+        UpgradeCode='4C6F9D2E-8B2A-4C1F-9E3D-2A7B5F6C8D10'
+        Manufacturer='rpmoore'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='A terminal markdown viewer with syntax-highlighted code blocks and link navigation.'
+            Manufacturer='rpmoore'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            Platform='x64'
+            SummaryCodepage='1252'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='term-markdown Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='term-markdown'>
+                    <Component Id='binary0' Guid='*' Win64='yes'>
+                        <File
+                            Id='exe0'
+                            Name='term-markdown.exe'
+                            DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\term-markdown.exe'
+                            KeyPath='yes'/>
+                    </Component>
+
+                    <Component Id='Path' Guid='*' Win64='yes'>
+                        <Environment
+                            Id='PATH'
+                            Name='PATH'
+                            Value='[APPLICATIONFOLDER]'
+                            Permanent='no'
+                            Part='last'
+                            Action='set'
+                            System='yes'/>
+                        <RegistryValue
+                            Root='HKLM'
+                            Key='Software\term-markdown'
+                            Name='installed'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs the term-markdown executable.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+
+            <Feature
+                Id='Environment'
+                Title='PATH Environment Variable'
+                Description='Add the install location to the PATH system environment variable so term-markdown can be run from any command prompt.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path'/>
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <Property Id='ARPHELPLINK' Value='https://github.com/rpmoore/term-markdown'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+        </UI>
+
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+
+    </Product>
+</Wix>
