@@ -10,23 +10,23 @@ tags: [tui, ratatui, crossterm]
 
 ## Lifecycle
 
-`main` (`src/main.rs:394-411`) parses CLI args via `clap` (`Args { file: PathBuf, root:
+`main` (`src/main.rs:443-460`) parses CLI args via `clap` (`Args { file: PathBuf, root:
 Option<PathBuf>, scheme: Option<String> }`, `src/main.rs:84-95`), fixes the bundle root for
 absolute links — `--root` if given (validated and canonicalized by `explicit_root`,
-`src/main.rs:415-423`), else `bundle::detect_root(&args.file)` (see
+`src/main.rs:464-472`), else `bundle::detect_root(&args.file)` (see
 [bundle-root](bundle-root.md)) — resolves the active color scheme via `scheme::Scheme::load`
 (see [scheme-loading](../config/scheme-loading.md)), all three of which fail *before* the
 terminal is touched, builds `App` (which eagerly reads and renders the file — `App::new`,
-`src/main.rs:213-227`), enters the terminal (`setup_terminal`, `src/main.rs:425-430`: raw mode +
+`src/main.rs:219-235`), enters the terminal (`setup_terminal`, `src/main.rs:474-479`: raw mode +
 alt screen + mouse capture), runs the event loop, then unconditionally restores the terminal
-(`restore_terminal`, `src/main.rs:432-441`: disable raw mode, disable mouse capture, leave alt
+(`restore_terminal`, `src/main.rs:481-490`: disable raw mode, disable mouse capture, leave alt
 screen, show cursor) before propagating `run`'s result. Restoration runs even if `run` returns
 `Err`, since it's called on the line after `run` rather than inside a `?`-chained expression —
 this prevents leaving the user's terminal in raw/alt-screen/mouse-capture mode on error.
 
 ## App state
 
-`App` (`src/main.rs:198-210`) holds: `path` (current file, doubles as the window title and, via
+`App` (`src/main.rs:198-216`) holds: `path` (current file, doubles as the window title and, via
 its parent dir, the base for resolving *relative* link targets), `bundle_root: PathBuf` (base
 for absolute `/x` link targets — fixed in `main` at startup and never touched by
 `load`/`go_back`, so climbing out of the bundle via a `../` link doesn't move it), `scheme:
@@ -35,15 +35,18 @@ scheme switching or live-reload), `body: Text<'static>` + `links: Vec<Link>` (bo
 `markdown::render`, not re-rendered per frame), `scroll: u16` (a **display-row** offset — see
 Row accounting below, not a logical-line index), `selected_link: Option<usize>` (index into
 `links`, for keyboard navigation), `history: Vec<(PathBuf, u16)>` (back-stack of `(path,
-scroll)` pairs pushed on forward navigation), and `status: Option<String>` (transient message
+scroll)` pairs pushed on forward navigation), `status: Option<String>` (transient message
 shown in place of the scroll-position status line — set by link-follow outcomes and mouse-click
-misses, cleared on the next key press other than Tab/Shift-Tab).
+misses, cleared on the next key press other than Tab/Shift-Tab), and `row_starts_cache: Vec<u32>`
++ `row_starts_cache_width: Option<u16>` (memoized `row_starts` result — see Row accounting
+below).
 
-`App::load` (`src/main.rs:229-239`) is the shared path for both initial load (`App::new`) and
+`App::load` (`src/main.rs:237-248`) is the shared path for both initial load (`App::new`) and
 navigating to a new file: it re-reads and calls `markdown::render(&source, &self.scheme)`,
-replacing `path`/`body`/`links` and resetting `scroll`/`selected_link` to 0/`None`. It does not
-touch `history` or `scheme` — callers manage the back-stack around it, and the scheme never
-changes after startup.
+replacing `path`/`body`/`links`, resetting `scroll`/`selected_link` to 0/`None`, and clearing
+`row_starts_cache_width` so the next `row_starts` call rebuilds against the new `body` rather
+than serving a stale cache keyed to the old document. It does not touch `history` or `scheme` —
+callers manage the back-stack around it, and the scheme never changes after startup.
 
 ## Row accounting
 
@@ -58,10 +61,10 @@ the wrong screen row.
 `wrapped_row_count(text, width)` (`src/main.rs:43-70`) reimplements ratatui's greedy word-wrap
 closely enough to count rows correctly (ratatui's own wrapper, `WordWrapper`, lives in a private
 module and isn't reusable). It returns `u32`, not `u16`, and `App::row_starts(width)`
-(`src/main.rs:252-262`) — which builds the cumulative per-line row offsets from it via
+(`src/main.rs:261-274`) — which builds the cumulative per-line row offsets from it via
 `saturating_add`, length `lines.len() + 1` with the trailing entry equal to the total row count —
 keeps that `u32` width too, rather than narrowing to `u16` at either point. `max_scroll` (returns
-`u32`) and `max_scroll_u16`/`scroll_by`/`ensure_line_visible` (`src/main.rs:279-317`) all
+`u32`) and `max_scroll_u16`/`scroll_by`/`ensure_line_visible` (`src/main.rs:292-330`) all
 clamp/compute against this total rather than `lines.len()`.
 
 Only `self.scroll` itself, and thus the final value handed to `Paragraph::scroll`, is a `u16` —
@@ -76,10 +79,10 @@ target scroll position in `u32`
 `row >= self.scroll as u32 + viewport_height as u32`) and only clamps down to `u16` — via
 `.min(u16::MAX as u32) as u16` — for the assignment to `self.scroll`, so `row` reaching exactly
 `u16::MAX` no longer costs a row the way a `u16`-typed `row + 1` would. `max_scroll_u16`
-(`src/main.rs:291-293`) is the one place that narrows `max_scroll`'s `u32` result down to what
+(`src/main.rs:304-306`) is the one place that narrows `max_scroll`'s `u32` result down to what
 `self.scroll` can hold; `scroll_by` and the draw loop's per-frame reclamp use it, while the status
 bar's `line {}/{}` display uses `max_scroll`'s `u32` directly since a displayed number needs no
-such clamping. `line_at_row(row, width)` (`src/main.rs:267-277`) — the inverse, binary-searching
+such clamping. `line_at_row(row, width)` (`src/main.rs:280-291`) — the inverse, binary-searching
 `row_starts` (`partition_point`) to turn a screen row back into `(logical_line,
 sub_row_within_line)` — takes and returns `u32` for the same reason, even though its only caller
 (mouse-click hit-testing) always passes a small value in practice.
@@ -89,13 +92,21 @@ distinct, unavoidable ratatui limitation — that content is genuinely unreachab
 or not — separate from the off-by-one this widening fixes, which was purely internal precision
 loss happening *before* hitting that real ceiling.
 
-This recomputes `row_starts` (an O(lines) pass with a per-line `String` allocation) on every
-draw and on every mouse click — acceptable for documents in the tens-to-hundreds of lines this
-viewer targets, not cached beyond that.
+`row_starts` used to rebuild this whole `Vec` from scratch on every call — every drawn frame
+(twice: once to reclamp `scroll`, once for the status bar's `max_scroll`), every scroll
+keypress, every mouse click — regardless of whether `width` or `body` had actually changed. It's
+now memoized in `row_starts_cache`/`row_starts_cache_width` (`&mut self`, since a cache hit still
+needs to hand back a borrow of `self`): a call only recomputes when `width` doesn't match the
+cached width, and `load` (`src/main.rs:246`) clears the cached width so a reload always misses.
+Because the cache key is just `width`, `App::new`/`load` also reset it — there's no path that
+mutates `body` without going through `load`, so this is the only invalidation point needed. This
+did require widening `row_starts`/`line_at_row`/`max_scroll`/`max_scroll_u16` from `&self` to
+`&mut self`; they're still O(lines) on a cache miss, so a first call after a resize or a reload
+is unchanged, and per-frame/per-scroll cost is what the cache removes.
 
 ## Draw loop
 
-`run` (`src/main.rs:443-574`) loops: draw a frame, then poll for input with a 250ms timeout so
+`run` (`src/main.rs:492-615`) loops: draw a frame, then poll for input with a 250ms timeout so
 the loop stays responsive without busy-waiting. Layout is two rows — `Constraint::Min(1)` body +
 `Constraint::Length(1)` status bar. `body_height`, `body_area`, and `content_width`
 (border-adjusted body width, i.e. `chunks[0].width - 2`, matching the width ratatui itself wraps
@@ -106,9 +117,13 @@ yet. `app.scroll` is also reclamped against the current frame's `max_scroll` at 
 draw closure, so a resize that shrinks the effective row count (or rewraps content narrower)
 can't leave `scroll` pointing past the end.
 
-The body is a bordered `Paragraph` wrapping `app.body.clone()` with `Wrap { trim: false }` and
-`.scroll((app.scroll, 0))` — `app.body` is cloned every frame since `Paragraph::new` takes
-ownership. Chrome styling comes from `app.scheme.ui` (see
+The body is a bordered `Paragraph` wrapping `app.display_text()` (`src/main.rs:404-430`) with
+`Wrap { trim: false }` and `.scroll((app.scroll, 0))` — `Paragraph::new` takes ownership of a
+`Text`, so some per-frame allocation is unavoidable, but `display_text` builds it by borrowing
+each span's text from `app.body` (`Span::styled` over `&str` produces `Cow::Borrowed`, not a
+copy of the owned `String`) rather than `app.body.clone()`-ing the whole document, so the cost
+is a `Vec` allocation per line/span rather than a byte-for-byte copy of the rendered text. Chrome
+styling comes from `app.scheme.ui` (see
 [scheme-loading](../config/scheme-loading.md)): if `ui.background` is `Some`, the draw closure
 fills the whole frame area with it before rendering anything else (new behavior — the built-in
 default scheme's `background` is `None`, so this is a no-op for zero-config users);
@@ -133,10 +148,10 @@ those would double-trigger scroll actions.
 | `u`, `PageUp` | scroll -half viewport |
 | `g`, `Home` | jump to top |
 | `G`, `End` | jump to bottom |
-| `Tab` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:319-332`) |
+| `Tab` | select next link, scrolling it into view (`select_next_link`, `src/main.rs:332-345`) |
 | `Shift+Tab` | select previous link |
-| `Enter` | follow the selected link (`follow_selected`, `src/main.rs:366-371`) |
-| `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:373-381`) |
+| `Enter` | follow the selected link (`follow_selected`, `src/main.rs:379-384`) |
+| `Backspace` | go back to the previous file/scroll position (`go_back`, `src/main.rs:386-393`) |
 
 The status bar shows `app.status` when set, otherwise the default scroll-position + key-hint
 line — so a link-follow outcome (external link, not-found target, no-previous-page,
@@ -170,7 +185,7 @@ is discarded (no scroll-to-line). Otherwise `NotFound` carries the first candida
 *as written*, and `follow` appends `(bundle root: …)` to the status message for absolute links
 so a misdetected root — fixable with `--root` — is obvious.
 
-`App::follow` (`src/main.rs:334-364`) drives the actual state change: only `Target::File`
+`App::follow` (`src/main.rs:347-377`) drives the actual state change: only `Target::File`
 mutates anything (pushes `(old_path, old_scroll)` onto `history` then calls `load`); every other
 variant just sets `status` to an explanatory message.
 
@@ -179,17 +194,17 @@ Selection and click share one underlying mechanism but diverge at the last step:
 into the viewport without auto-following; `Enter` then calls `follow_selected`, which clones the
 selected link's target and calls `follow`. A mouse left-click instead resolves the clicked
 screen row via `line_at_row`, and — only when the click landed on row 0 of its logical line (see
-Mouse hit-testing below) — calls `link_at` (`src/main.rs:384-391`) to hit-test the column
+Mouse hit-testing below) — calls `link_at` (`src/main.rs:433-441`) to hit-test the column
 against `links`; on a hit it sets `selected_link` *and* immediately calls `follow_selected` in
 the same step (click = select + open, no separate confirm).
 
-Selected-link highlighting is applied at draw time, not baked into `app.body`: each frame, if
-`selected_link` is set, the draw closure clones `app.body` (already cloned every frame
-regardless — see Draw loop) and patches `app.scheme.ui.selection` onto just that link's
-`span_start..span_end` range on its line before building the `Paragraph` (the built-in default
-scheme sets `selection` to `Modifier::REVERSED`, matching the original hardcoded behavior).
-`app.body` itself is never mutated, so switching or clearing the selection needs no re-render
-through `markdown::render`.
+Selected-link highlighting is applied at draw time, not baked into `app.body`:
+`display_text` (`src/main.rs:404-430`, see Draw loop) rebuilds every span each frame — if
+`selected_link` is set, spans within its `span_start..span_end` range on its line get
+`app.scheme.ui.selection` patched onto their style, everything else keeps its original style
+(the built-in default scheme sets `selection` to `Modifier::REVERSED`, matching the original
+hardcoded behavior). `app.body` itself is never mutated, so switching or clearing the selection
+needs no re-render through `markdown::render`.
 
 ## Mouse hit-testing
 
