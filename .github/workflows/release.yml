@@ -117,7 +117,7 @@ jobs:
         run: cargo install cargo-wix --locked
 
       - name: Build MSI installer
-        run: cargo wix build --nocapture --output "target\wix\term-markdown-${env:RELEASE_TAG}-windows-x86_64.msi"
+        run: cargo wix --nocapture --no-build --target-bin-dir target\release --output "target\wix\term-markdown-${env:RELEASE_TAG}-windows-x86_64.msi"
 
       - name: Checksum MSI
         shell: bash
