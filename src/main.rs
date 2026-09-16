@@ -69,6 +69,15 @@ fn wrapped_row_count(text: &str, width: u16) -> u32 {
     rows.min(u32::MAX as usize) as u32
 }
 
+/// The absolute document row a mouse click's screen row (`mouse_row`, known
+/// to be inside the body area, so `mouse_row > body_area_y`) maps to, given
+/// the current scroll offset. Widened to `u32` before adding: `scroll` can
+/// be near `u16::MAX` on a large enough document (see `wrapped_row_count`),
+/// and computing this sum in `u16` could overflow.
+fn absolute_click_row(scroll: u16, mouse_row: u16, body_area_y: u16) -> u32 {
+    scroll as u32 + (mouse_row - body_area_y - 1) as u32
+}
+
 /// Terminal markdown viewer.
 #[derive(ClapParser)]
 #[command(name = "term-markdown", version, about)]
@@ -531,9 +540,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                             && mouse.column > body_area.x
                             && mouse.column + 1 < body_area.x + body_area.width;
                         if inside {
-                            let row = app.scroll + (mouse.row - body_area.y - 1);
+                            let row = absolute_click_row(app.scroll, mouse.row, body_area.y);
                             let col = mouse.column - body_area.x - 1;
-                            match app.line_at_row(row as u32, content_width) {
+                            match app.line_at_row(row, content_width) {
                                 Some((line, 0)) => match app.link_at(line, col) {
                                     Some(idx) => {
                                         app.status = None;
@@ -882,6 +891,19 @@ mod tests {
     #[test]
     fn short_text_takes_one_row() {
         assert_eq!(wrapped_row_count("hello world", 80), 1);
+    }
+
+    #[test]
+    fn absolute_click_row_does_not_overflow_near_scroll_ceiling() {
+        // Regression test (found by a Copilot PR review): computing
+        // `scroll + (mouse_row - body_area_y - 1)` in u16 could overflow
+        // when scroll is near u16::MAX on a large enough document and a
+        // click lands near the bottom of the viewport.
+        let scroll = u16::MAX - 5;
+        assert_eq!(
+            absolute_click_row(scroll, 25, 5),
+            scroll as u32 + 19 // mouse_row - body_area_y - 1 = 25 - 5 - 1
+        );
     }
 
     #[test]
