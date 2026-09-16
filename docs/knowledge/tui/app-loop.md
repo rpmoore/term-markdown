@@ -141,7 +141,7 @@ background/border/title).
 
 Only `KeyEventKind::Press` is handled, which matters on Windows/some terminals that also emit
 `Release`/`Repeat` key events under crossterm's enhanced keyboard protocol — without this filter
-those would double-trigger scroll actions.
+those would double-trigger scroll and link-navigation actions alike.
 
 | Key | Action |
 |---|---|

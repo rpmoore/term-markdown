@@ -529,14 +529,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
 
     loop {
         terminal.draw(|frame| {
-            let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
-                .split(frame.area());
+            let chunks =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
             body_area = chunks[0];
             body_height = chunks[0].height.saturating_sub(2);
             content_width = chunks[0].width.saturating_sub(2);
 
-            app.scroll = app.scroll.min(app.max_scroll_u16(body_height, content_width));
+            app.scroll = app
+                .scroll
+                .min(app.max_scroll_u16(body_height, content_width));
 
             if let Some(bg) = app.scheme.ui.background {
                 frame.render_widget(Block::default().style(bg), frame.area());
@@ -560,8 +562,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
             frame.render_widget(paragraph, chunks[0]);
 
             let max = app.max_scroll(body_height, content_width);
-            let hint =
-                "q: quit  j/k: scroll  g/G: top/bottom  Tab/↓: next link  Enter: open  Backspace: back";
+            let hint = "q: quit  j/k: scroll  g/G: top/bottom  Tab/↓: next link  \
+                Shift+Tab/↑: prev link  Enter: open  Backspace: back";
             let status_text = match &app.status {
                 Some(msg) => format!(" {msg}"),
                 None => format!(" line {}/{}  |  {}", app.scroll, max, hint),
