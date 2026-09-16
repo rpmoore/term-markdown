@@ -489,6 +489,39 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
+/// Applies one key press to `app`. Returns `true` if the app should quit.
+fn dispatch_key(app: &mut App, code: KeyCode, body_height: u16, content_width: u16) -> bool {
+    if !matches!(
+        code,
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Down | KeyCode::Up
+    ) {
+        app.status = None;
+    }
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('j') => app.scroll_by(1, body_height, content_width),
+        KeyCode::Char('k') => app.scroll_by(-1, body_height, content_width),
+        KeyCode::Char('d') | KeyCode::PageDown => {
+            app.scroll_by(body_height as i32 / 2, body_height, content_width)
+        }
+        KeyCode::Char('u') | KeyCode::PageUp => {
+            app.scroll_by(-(body_height as i32) / 2, body_height, content_width)
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            app.scroll_by(i32::MIN / 2, body_height, content_width)
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            app.scroll_by(i32::MAX / 2, body_height, content_width)
+        }
+        KeyCode::Tab | KeyCode::Down => app.select_next_link(true, body_height, content_width),
+        KeyCode::BackTab | KeyCode::Up => app.select_next_link(false, body_height, content_width),
+        KeyCode::Enter => app.follow_selected(),
+        KeyCode::Backspace => app.go_back(),
+        _ => {}
+    }
+    false
+}
+
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     let mut body_height: u16 = 0;
     let mut body_area = Rect::default();
@@ -496,14 +529,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
 
     loop {
         terminal.draw(|frame| {
-            let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
-                .split(frame.area());
+            let chunks =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
             body_area = chunks[0];
             body_height = chunks[0].height.saturating_sub(2);
             content_width = chunks[0].width.saturating_sub(2);
 
-            app.scroll = app.scroll.min(app.max_scroll_u16(body_height, content_width));
+            app.scroll = app
+                .scroll
+                .min(app.max_scroll_u16(body_height, content_width));
 
             if let Some(bg) = app.scheme.ui.background {
                 frame.render_widget(Block::default().style(bg), frame.area());
@@ -527,7 +562,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
             frame.render_widget(paragraph, chunks[0]);
 
             let max = app.max_scroll(body_height, content_width);
-            let hint = "q: quit  j/k: scroll  g/G: top/bottom  Tab: next link  Enter: open  Backspace: back";
+            let hint = "q: quit  j/k: scroll  g/G: top/bottom  Tab/↓: next link  \
+                Shift+Tab/↑: prev link  Enter: open  Backspace: back";
             let status_text = match &app.status {
                 Some(msg) => format!(" {msg}"),
                 None => format!(" line {}/{}  |  {}", app.scroll, max, hint),
@@ -544,34 +580,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Resu
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-                        app.status = None;
-                    }
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            app.scroll_by(1, body_height, content_width)
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            app.scroll_by(-1, body_height, content_width)
-                        }
-                        KeyCode::Char('d') | KeyCode::PageDown => {
-                            app.scroll_by(body_height as i32 / 2, body_height, content_width)
-                        }
-                        KeyCode::Char('u') | KeyCode::PageUp => {
-                            app.scroll_by(-(body_height as i32) / 2, body_height, content_width)
-                        }
-                        KeyCode::Char('g') | KeyCode::Home => {
-                            app.scroll_by(i32::MIN / 2, body_height, content_width)
-                        }
-                        KeyCode::Char('G') | KeyCode::End => {
-                            app.scroll_by(i32::MAX / 2, body_height, content_width)
-                        }
-                        KeyCode::Tab => app.select_next_link(true, body_height, content_width),
-                        KeyCode::BackTab => app.select_next_link(false, body_height, content_width),
-                        KeyCode::Enter => app.follow_selected(),
-                        KeyCode::Backspace => app.go_back(),
-                        _ => {}
+                    if dispatch_key(app, key.code, body_height, content_width) {
+                        break;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -1004,6 +1014,29 @@ mod tests {
             app.scroll,
             app.scroll as u32 + 20
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn arrow_keys_navigate_links_like_tab_and_shift_tab() {
+        let dir = temp_tree("arrowlinks");
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "[a](a.md) [b](b.md)\n").unwrap();
+        touch(&dir.join("a.md"));
+        touch(&dir.join("b.md"));
+
+        let mut app = App::new(file, dir.clone(), Scheme::default_builtin()).unwrap();
+        assert_eq!(app.selected_link, None);
+
+        assert!(!dispatch_key(&mut app, KeyCode::Down, 20, 80));
+        assert_eq!(app.selected_link, Some(0));
+
+        assert!(!dispatch_key(&mut app, KeyCode::Down, 20, 80));
+        assert_eq!(app.selected_link, Some(1));
+
+        assert!(!dispatch_key(&mut app, KeyCode::Up, 20, 80));
+        assert_eq!(app.selected_link, Some(0));
 
         std::fs::remove_dir_all(&dir).ok();
     }
