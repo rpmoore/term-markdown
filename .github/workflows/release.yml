@@ -69,9 +69,76 @@ jobs:
             "term-markdown-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz.sha256" \
             --clobber
 
+  build-windows:
+    name: Build windows-x86_64 (zip + MSI installer)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64
+
+      - name: Verify release tag matches Cargo.toml version
+        shell: bash
+        run: |
+          cargo_version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$RELEASE_TAG" != "v$cargo_version" ]; then
+            echo "::error::release tag '$RELEASE_TAG' does not match Cargo.toml version 'v$cargo_version' — bump Cargo.toml and merge before tagging"
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package zip
+        shell: bash
+        run: |
+          7z a "term-markdown-${RELEASE_TAG}-windows-x86_64.zip" ./target/release/term-markdown.exe
+
+      - name: Checksum zip
+        shell: bash
+        run: |
+          sha256sum "term-markdown-${RELEASE_TAG}-windows-x86_64.zip" > "term-markdown-${RELEASE_TAG}-windows-x86_64.zip.sha256"
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build MSI installer
+        run: cargo wix build --nocapture --output "target\wix\term-markdown-${env:RELEASE_TAG}-windows-x86_64.msi"
+
+      - name: Checksum MSI
+        shell: bash
+        run: |
+          sha256sum "target/wix/term-markdown-${RELEASE_TAG}-windows-x86_64.msi" > "term-markdown-${RELEASE_TAG}-windows-x86_64.msi.sha256"
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "term-markdown-${RELEASE_TAG}-windows-x86_64.zip" \
+            "term-markdown-${RELEASE_TAG}-windows-x86_64.zip.sha256" \
+            "target/wix/term-markdown-${RELEASE_TAG}-windows-x86_64.msi" \
+            "term-markdown-${RELEASE_TAG}-windows-x86_64.msi.sha256" \
+            --clobber
+
   notes:
     name: Generate release notes
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
