@@ -2,7 +2,7 @@
 
 A terminal markdown viewer with syntax-highlighted code blocks and link navigation, built with [ratatui](https://ratatui.rs) + [crossterm](https://github.com/crossterm-rs/crossterm).
 
-<img width="1170" height="1067" alt="Screenshot 2026-10-12 at 13 10 15" src="https://github.com/user-attachments/assets/170b481b-9151-4ade-b6f5-60f915d6a006" />
+<img width="1170" height="1067" alt="term-markdown rendering a markdown file in the terminal with syntax-highlighted code blocks" src="https://github.com/user-attachments/assets/170b481b-9151-4ade-b6f5-60f915d6a006" />
 
 
 ## Install
